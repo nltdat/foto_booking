@@ -1,4 +1,6 @@
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import (
+    extend_schema,
+)
 from rest_framework import generics, permissions, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
@@ -6,6 +8,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.views import APIView
 
 from .models import PhotographerProfile, User
+from .permissions import IsPhotographer
 from .serializers import (
     HealthCheckSerializer,
     LoginSerializer,
@@ -18,18 +21,6 @@ from .serializers import (
     UserMeUpdateSerializer,
     UserProfileSerializer,
 )
-
-
-class IsPhotographer(permissions.BasePermission):
-    message = "Chỉ nhiếp ảnh gia mới có quyền truy cập tài nguyên này."
-
-    def has_permission(self, request, view):
-        user = request.user
-        return bool(
-            user
-            and user.is_authenticated
-            and user.role == User.Roles.PHOTOGRAPHER
-        )
 
 
 class HealthCheckAPIView(APIView):

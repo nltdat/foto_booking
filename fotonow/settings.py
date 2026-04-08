@@ -32,6 +32,8 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "storages",
     "user",
+    "locations",
+    "portfolio",
 ]
 
 MIDDLEWARE = [
