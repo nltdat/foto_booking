@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "locations",
     "portfolio",
     "bookings",
+    "reviews.apps.ReviewsConfig",
 ]
 
 MIDDLEWARE = [
