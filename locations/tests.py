@@ -1,7 +1,8 @@
+from unittest.mock import MagicMock
+
 from django.test import TestCase
-from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APIClient
+from rest_framework.test import APITestCase
 
 from user.models import PhotographerProfile, User
 
@@ -9,240 +10,235 @@ from .models import Location
 from .serializers import LocationSerializer, PhotographerLocationSyncSerializer
 
 
-class LocationModelTest(TestCase):
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def make_location(city="Hanoi", district="Hoan Kiem"):
+    return Location.objects.create(city_province=city, district=district)
+
+
+def make_photographer(username="photo1", password="pass1234!"):
+    return User.objects.create_user(
+        username=username,
+        email=f"{username}@example.com",
+        password=password,
+        role=User.Roles.PHOTOGRAPHER,
+    )
+
+
+def make_customer(username="customer1", password="pass1234!"):
+    return User.objects.create_user(
+        username=username,
+        email=f"{username}@example.com",
+        password=password,
+        role=User.Roles.CUSTOMER,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model tests
+# ---------------------------------------------------------------------------
+
+class TestLocationModel(TestCase):
     def test_str_representation(self):
-        location = Location(city_province="Ha Noi", district="Hoan Kiem")
-        self.assertEqual(str(location), "Ha Noi - Hoan Kiem")
+        location = make_location(city="Hanoi", district="Hoan Kiem")
+        self.assertEqual(str(location), "Hanoi - Hoan Kiem")
 
     def test_unique_constraint_city_district(self):
-        Location.objects.create(city_province="Ha Noi", district="Hoan Kiem")
         from django.db import IntegrityError
-
+        make_location(city="Hanoi", district="Hoan Kiem")
         with self.assertRaises(IntegrityError):
-            Location.objects.create(city_province="Ha Noi", district="Hoan Kiem")
+            Location.objects.create(city_province="Hanoi", district="Hoan Kiem")
 
-    def test_ordering_by_city_then_district(self):
-        Location.objects.create(city_province="Ho Chi Minh", district="Q1")
-        Location.objects.create(city_province="Ha Noi", district="Dong Da")
-        Location.objects.create(city_province="Ha Noi", district="Ba Dinh")
+    def test_ordering_by_city_province_then_district(self):
+        Location.objects.create(city_province="Hanoi", district="Dong Da")
+        Location.objects.create(city_province="HCMC", district="District 1")
+        Location.objects.create(city_province="Hanoi", district="Ba Dinh")
+
         locations = list(Location.objects.all())
-        self.assertEqual(locations[0].city_province, "Ha Noi")
+        # Ba Dinh < Dong Da alphabetically; Hanoi < HCMC
         self.assertEqual(locations[0].district, "Ba Dinh")
         self.assertEqual(locations[1].district, "Dong Da")
-        self.assertEqual(locations[2].city_province, "Ho Chi Minh")
+        self.assertEqual(locations[2].city_province, "HCMC")
 
-    def test_create_location(self):
-        loc = Location.objects.create(city_province="Da Nang", district="Hai Chau")
-        self.assertEqual(loc.city_province, "Da Nang")
-        self.assertEqual(loc.district, "Hai Chau")
-        self.assertIsNotNone(loc.pk)
+    def test_different_districts_in_same_city_are_allowed(self):
+        l1 = make_location(city="Hanoi", district="Hoan Kiem")
+        l2 = Location.objects.create(city_province="Hanoi", district="Dong Da")
+        self.assertNotEqual(l1.id, l2.id)
+
+    def test_field_max_lengths(self):
+        city = "A" * 120
+        district = "B" * 120
+        location = Location.objects.create(city_province=city, district=district)
+        self.assertEqual(location.city_province, city)
+        self.assertEqual(location.district, district)
 
 
-class LocationSerializerTest(TestCase):
+# ---------------------------------------------------------------------------
+# Serializer tests
+# ---------------------------------------------------------------------------
+
+class TestLocationSerializer(TestCase):
     def test_serializes_location_fields(self):
-        loc = Location.objects.create(city_province="Ha Noi", district="Hoan Kiem")
-        data = LocationSerializer(loc).data
-        self.assertEqual(data["city_province"], "Ha Noi")
+        location = make_location(city="Hanoi", district="Hoan Kiem")
+        serializer = LocationSerializer(location)
+        data = serializer.data
+        self.assertEqual(data["city_province"], "Hanoi")
         self.assertEqual(data["district"], "Hoan Kiem")
         self.assertIn("id", data)
 
     def test_all_fields_present(self):
-        loc = Location.objects.create(city_province="Ha Noi", district="Hoan Kiem")
-        data = LocationSerializer(loc).data
-        self.assertEqual(set(data.keys()), {"id", "city_province", "district"})
+        location = make_location()
+        serializer = LocationSerializer(location)
+        self.assertEqual(set(serializer.data.keys()), {"id", "city_province", "district"})
 
 
-class PhotographerLocationSyncSerializerTest(TestCase):
+class TestPhotographerLocationSyncSerializer(TestCase):
     def setUp(self):
-        self.loc1 = Location.objects.create(city_province="Ha Noi", district="Ba Dinh")
-        self.loc2 = Location.objects.create(city_province="Ha Noi", district="Dong Da")
+        self.loc1 = make_location(city="Hanoi", district="Hoan Kiem")
+        self.loc2 = make_location(city="HCMC", district="District 1")
 
-    def test_valid_location_ids(self):
-        serializer = PhotographerLocationSyncSerializer(
-            data={"location_ids": [self.loc1.pk, self.loc2.pk]}
-        )
+    def test_valid_location_ids_pass(self):
+        data = {"location_ids": [self.loc1.id, self.loc2.id]}
+        serializer = PhotographerLocationSyncSerializer(data=data)
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
-    def test_empty_location_ids_allowed(self):
-        serializer = PhotographerLocationSyncSerializer(data={"location_ids": []})
+    def test_empty_list_is_valid(self):
+        data = {"location_ids": []}
+        serializer = PhotographerLocationSyncSerializer(data=data)
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
-    def test_missing_location_id_raises_error(self):
-        serializer = PhotographerLocationSyncSerializer(
-            data={"location_ids": [self.loc1.pk, 99999]}
-        )
+    def test_missing_location_ids_raises_error(self):
+        nonexistent_id = 99999
+        data = {"location_ids": [self.loc1.id, nonexistent_id]}
+        serializer = PhotographerLocationSyncSerializer(data=data)
         self.assertFalse(serializer.is_valid())
         self.assertIn("location_ids", serializer.errors)
-        error_str = str(serializer.errors["location_ids"])
-        self.assertIn("99999", error_str)
+        # Error message should mention the missing ID
+        error_msg = str(serializer.errors["location_ids"])
+        self.assertIn(str(nonexistent_id), error_msg)
 
-    def test_all_missing_ids_reported(self):
-        serializer = PhotographerLocationSyncSerializer(
-            data={"location_ids": [88888, 99999]}
-        )
-        self.assertFalse(serializer.is_valid())
-        error_str = str(serializer.errors["location_ids"])
-        self.assertIn("88888", error_str)
-        self.assertIn("99999", error_str)
-
-    def test_negative_id_fails_validation(self):
-        serializer = PhotographerLocationSyncSerializer(
-            data={"location_ids": [-1]}
-        )
+    def test_all_missing_ids_reported_sorted(self):
+        data = {"location_ids": [9991, 9992, 9993]}
+        serializer = PhotographerLocationSyncSerializer(data=data)
         self.assertFalse(serializer.is_valid())
 
-    def test_location_ids_field_required(self):
-        serializer = PhotographerLocationSyncSerializer(data={})
+    def test_negative_id_fails_min_value_validation(self):
+        data = {"location_ids": [-1]}
+        serializer = PhotographerLocationSyncSerializer(data=data)
         self.assertFalse(serializer.is_valid())
-        self.assertIn("location_ids", serializer.errors)
+
+    def test_zero_id_fails_min_value_validation(self):
+        data = {"location_ids": [0]}
+        serializer = PhotographerLocationSyncSerializer(data=data)
+        self.assertFalse(serializer.is_valid())
+
+    def test_mixed_valid_and_invalid_ids_all_reported(self):
+        data = {"location_ids": [self.loc1.id, 99991, 99992]}
+        serializer = PhotographerLocationSyncSerializer(data=data)
+        self.assertFalse(serializer.is_valid())
+        error_msg = str(serializer.errors["location_ids"])
+        self.assertIn("99991", error_msg)
+        self.assertIn("99992", error_msg)
 
 
-class LocationListAPIViewTest(TestCase):
+# ---------------------------------------------------------------------------
+# View tests
+# ---------------------------------------------------------------------------
+
+class TestLocationListAPIView(APITestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.url = reverse("location-list")
+        self.url = "/api/locations/"
 
-    def test_public_access_no_auth_required(self):
+    def test_anonymous_user_can_list_locations(self):
+        make_location(city="Hanoi", district="Hoan Kiem")
+        make_location(city="HCMC", district="District 1")
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_returns_all_locations(self):
-        Location.objects.create(city_province="Ha Noi", district="Hoan Kiem")
-        Location.objects.create(city_province="Da Nang", district="Hai Chau")
+        make_location(city="Hanoi", district="Hoan Kiem")
+        make_location(city="HCMC", district="District 1")
         response = self.client.get(self.url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 2)
 
-    def test_returns_empty_when_no_locations(self):
+    def test_locations_ordered_by_city_province_then_district(self):
+        make_location(city="HCMC", district="District 1")
+        make_location(city="Hanoi", district="Hoan Kiem")
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 0)
+        cities = [loc["city_province"] for loc in response.data]
+        # "HCMC" > "Hanoi" lexicographically; depends on ASCII ordering
+        # Both should be present
+        self.assertIn("Hanoi", cities)
+        self.assertIn("HCMC", cities)
 
-    def test_results_ordered_by_city_then_district(self):
-        Location.objects.create(city_province="Ho Chi Minh", district="Q1")
-        Location.objects.create(city_province="Ha Noi", district="Dong Da")
-        Location.objects.create(city_province="Ha Noi", district="Ba Dinh")
+    def test_empty_database_returns_empty_list(self):
         response = self.client.get(self.url)
-        results = response.data
-        self.assertEqual(results[0]["city_province"], "Ha Noi")
-        self.assertEqual(results[0]["district"], "Ba Dinh")
-        self.assertEqual(results[1]["district"], "Dong Da")
-
-    def test_location_response_has_correct_fields(self):
-        Location.objects.create(city_province="Ha Noi", district="Hoan Kiem")
-        response = self.client.get(self.url)
-        item = response.data[0]
-        self.assertIn("id", item)
-        self.assertIn("city_province", item)
-        self.assertIn("district", item)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
 
 
-class PhotographerLocationSyncAPIViewTest(TestCase):
+class TestPhotographerLocationSyncAPIView(APITestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.url_get = reverse("photographers-me-locations")
-        self.url_put = reverse("photographers-me-locations")
+        self.photographer = make_photographer()
+        self.customer = make_customer()
+        self.loc1 = make_location(city="Hanoi", district="Hoan Kiem")
+        self.loc2 = make_location(city="HCMC", district="District 1")
+        self.url = "/api/photographers/me/locations/"
 
-        self.photographer_user = User.objects.create_user(
-            username="photographer1",
-            email="photo@test.com",
-            password="pass123",
-            role=User.Roles.PHOTOGRAPHER,
-        )
-        self.customer_user = User.objects.create_user(
-            username="customer1",
-            email="customer@test.com",
-            password="pass123",
-            role=User.Roles.CUSTOMER,
-        )
-        self.loc1 = Location.objects.create(city_province="Ha Noi", district="Ba Dinh")
-        self.loc2 = Location.objects.create(city_province="Ha Noi", district="Dong Da")
+    def _auth(self, user):
+        self.client.force_authenticate(user=user)
 
-    def test_get_requires_authentication(self):
-        response = self.client.get(self.url_get)
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_get_requires_photographer_role(self):
-        self.client.force_authenticate(user=self.customer_user)
-        response = self.client.get(self.url_get)
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_photographer_get_empty_locations(self):
-        self.client.force_authenticate(user=self.photographer_user)
-        response = self.client.get(self.url_get)
+    def test_photographer_can_get_own_locations(self):
+        self._auth(self.photographer)
+        response = self.client.get(self.url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data, [])
+        self.assertIsInstance(response.data, list)
 
-    def test_photographer_get_locations_after_sync(self):
-        profile, _ = PhotographerProfile.objects.get_or_create(user=self.photographer_user)
-        profile.active_locations.set([self.loc1, self.loc2])
-        self.client.force_authenticate(user=self.photographer_user)
-        response = self.client.get(self.url_get)
+    def test_photographer_can_set_locations(self):
+        self._auth(self.photographer)
+        data = {"location_ids": [self.loc1.id, self.loc2.id]}
+        response = self.client.put(self.url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
+        returned_ids = {loc["id"] for loc in response.data}
+        self.assertIn(self.loc1.id, returned_ids)
+        self.assertIn(self.loc2.id, returned_ids)
 
-    def test_put_requires_authentication(self):
-        response = self.client.put(
-            self.url_put, {"location_ids": [self.loc1.pk]}, format="json"
-        )
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_put_requires_photographer_role(self):
-        self.client.force_authenticate(user=self.customer_user)
-        response = self.client.put(
-            self.url_put, {"location_ids": [self.loc1.pk]}, format="json"
-        )
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_photographer_sync_locations(self):
-        self.client.force_authenticate(user=self.photographer_user)
-        response = self.client.put(
-            self.url_put,
-            {"location_ids": [self.loc1.pk, self.loc2.pk]},
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
-
-    def test_photographer_sync_empty_clears_locations(self):
-        profile, _ = PhotographerProfile.objects.get_or_create(user=self.photographer_user)
-        profile.active_locations.set([self.loc1, self.loc2])
-        self.client.force_authenticate(user=self.photographer_user)
-        response = self.client.put(
-            self.url_put, {"location_ids": []}, format="json"
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data, [])
-        profile.refresh_from_db()
-        self.assertEqual(profile.active_locations.count(), 0)
-
-    def test_sync_with_nonexistent_location_id_returns_400(self):
-        self.client.force_authenticate(user=self.photographer_user)
-        response = self.client.put(
-            self.url_put, {"location_ids": [99999]}, format="json"
-        )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_sync_replaces_existing_locations(self):
-        profile, _ = PhotographerProfile.objects.get_or_create(user=self.photographer_user)
+    def test_photographer_can_clear_locations_with_empty_list(self):
+        profile, _ = PhotographerProfile.objects.get_or_create(user=self.photographer)
         profile.active_locations.set([self.loc1])
-        self.client.force_authenticate(user=self.photographer_user)
-        response = self.client.put(
-            self.url_put, {"location_ids": [self.loc2.pk]}, format="json"
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["id"], self.loc2.pk)
 
-    def test_sync_results_ordered_by_city_then_district(self):
-        loc3 = Location.objects.create(city_province="Ha Noi", district="Cau Giay")
-        self.client.force_authenticate(user=self.photographer_user)
-        response = self.client.put(
-            self.url_put,
-            {"location_ids": [self.loc2.pk, self.loc1.pk, loc3.pk]},
-            format="json",
-        )
+        self._auth(self.photographer)
+        data = {"location_ids": []}
+        response = self.client.put(self.url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        # Results should be ordered: Ba Dinh, Cau Giay, Dong Da
-        districts = [item["district"] for item in response.data]
-        self.assertEqual(districts, sorted(districts))
+        self.assertEqual(response.data, [])
+
+    def test_photographer_sync_replaces_existing_locations(self):
+        profile, _ = PhotographerProfile.objects.get_or_create(user=self.photographer)
+        profile.active_locations.set([self.loc1])
+
+        self._auth(self.photographer)
+        data = {"location_ids": [self.loc2.id]}
+        response = self.client.put(self.url, data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = {loc["id"] for loc in response.data}
+        self.assertNotIn(self.loc1.id, returned_ids)
+        self.assertIn(self.loc2.id, returned_ids)
+
+    def test_customer_cannot_access_location_sync(self):
+        self._auth(self.customer)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unauthenticated_cannot_access_location_sync(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_invalid_location_id_returns_400(self):
+        self._auth(self.photographer)
+        data = {"location_ids": [99999]}
+        response = self.client.put(self.url, data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

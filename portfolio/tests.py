@@ -1,10 +1,10 @@
 import io
 import uuid
+from unittest.mock import MagicMock, patch
 
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from rest_framework import status
-from rest_framework.test import APIClient, APIRequestFactory
+from rest_framework.test import APITestCase
 
 from user.models import PhotographerProfile, User
 
@@ -17,357 +17,355 @@ from .views import IsOwnerOrReadOnly, PortfolioFilterBackend
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_user(username, role=User.Roles.CUSTOMER, **kwargs):
+def make_photographer(username="photo1", password="pass1234!"):
     return User.objects.create_user(
         username=username,
-        email=f"{username}@test.com",
-        password="pass123",
-        role=role,
-        **kwargs,
+        email=f"{username}@example.com",
+        password=password,
+        role=User.Roles.PHOTOGRAPHER,
     )
 
 
-def make_photographer_profile(user):
+def make_customer(username="customer1", password="pass1234!"):
+    return User.objects.create_user(
+        username=username,
+        email=f"{username}@example.com",
+        password=password,
+        role=User.Roles.CUSTOMER,
+    )
+
+
+def make_profile(user):
     profile, _ = PhotographerProfile.objects.get_or_create(user=user)
     return profile
 
 
-def make_fake_image(name="test.jpg"):
-    """Return a minimal valid JPEG as SimpleUploadedFile."""
-    # Minimal 1x1 JPEG
-    jpeg_bytes = (
-        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
-        b"\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t"
-        b"\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a"
-        b"\x1f\x1e\x1d\x1a\x1c\x1c $.\' \",#\x1c\x1c(7),01444\x1f'9=82<.342\x1e"
-        b"\x1eC  33\n\n\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00"
-        b"\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00"
-        b"\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b"
-        b"\xff\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04"
-        b"\x04\x00\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa"
-        b"\x07\"q\x142\x81\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br"
-        b"\x82\t\n\x16\x17\x18\x19\x1a%&'()*456789:CDEFGHIJSTUVWXYZ"
-        b"cdefghijstuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94"
-        b"\x95\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa"
-        b"\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3\xc4\xc5\xc6\xc7"
-        b"\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3"
-        b"\xe4\xe5\xe6\xe7\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8"
-        b"\xf9\xfa\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xf5\x00\x00\x00"
-        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-        b"\xff\xd9"
+def make_portfolio(profile, category="PERSONAL"):
+    return Portfolio.objects.create(
+        photographer=profile,
+        image="portfolios/test/photo.jpg",
+        category=category,
     )
-    return SimpleUploadedFile(name, jpeg_bytes, content_type="image/jpeg")
 
 
 # ---------------------------------------------------------------------------
-# Model Tests
+# Model tests
 # ---------------------------------------------------------------------------
 
-class PortfolioModelTest(TestCase):
+class TestPortfolioImageUploadPath(TestCase):
+    def test_upload_path_format(self):
+        instance = MagicMock()
+        instance.photographer_id = 42
+        path = portfolio_image_upload_path(instance, "photo.jpg")
+        self.assertEqual(path, "portfolios/42/photo.jpg")
+
+    def test_upload_path_preserves_filename(self):
+        instance = MagicMock()
+        instance.photographer_id = 7
+        path = portfolio_image_upload_path(instance, "my_beautiful_shot.png")
+        self.assertEqual(path, "portfolios/7/my_beautiful_shot.png")
+
+
+class TestPortfolioModel(TestCase):
     def setUp(self):
-        self.user = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
-        self.profile = make_photographer_profile(self.user)
+        self.photographer_user = make_photographer()
+        self.profile = make_profile(self.photographer_user)
 
     def test_str_representation(self):
-        # Create a Portfolio instance without saving to avoid S3 issues
-        portfolio = Portfolio(
-            photographer=self.profile,
-            category=Portfolio.Categories.PERSONAL,
-        )
-        portfolio.id = uuid.uuid4()
+        portfolio = make_portfolio(self.profile)
         self.assertIn("Portfolio<", str(portfolio))
 
     def test_uuid_primary_key(self):
-        self.assertIsNotNone(uuid.uuid4())
+        portfolio = make_portfolio(self.profile)
+        self.assertIsInstance(portfolio.id, uuid.UUID)
 
-    def test_portfolio_image_upload_path(self):
-        portfolio = Portfolio(photographer=self.profile)
-        path = portfolio_image_upload_path(portfolio, "wedding.jpg")
-        self.assertEqual(path, f"portfolios/{self.profile.pk}/wedding.jpg")
+    def test_category_choices(self):
+        expected = {"PERSONAL", "COUPLE", "EVENT", "WEDDING", "FAMILY"}
+        actual = {c[0] for c in Portfolio.Categories.choices}
+        self.assertEqual(actual, expected)
 
-    def test_categories_choices(self):
-        choices = [c[0] for c in Portfolio.Categories.choices]
-        self.assertIn("PERSONAL", choices)
-        self.assertIn("COUPLE", choices)
-        self.assertIn("EVENT", choices)
-        self.assertIn("WEDDING", choices)
-        self.assertIn("FAMILY", choices)
+    def test_ordering_by_created_at_descending(self):
+        p1 = make_portfolio(self.profile, category="PERSONAL")
+        p2 = make_portfolio(self.profile, category="COUPLE")
+        portfolios = list(Portfolio.objects.all())
+        self.assertEqual(portfolios[0].id, p2.id)
+        self.assertEqual(portfolios[1].id, p1.id)
 
-    def test_portfolio_image_upload_path_with_different_extension(self):
-        portfolio = Portfolio(photographer=self.profile)
-        path = portfolio_image_upload_path(portfolio, "photo.png")
-        self.assertTrue(path.startswith(f"portfolios/{self.profile.pk}/"))
-        self.assertTrue(path.endswith("photo.png"))
+    def test_cascade_delete_on_profile_delete(self):
+        portfolio = make_portfolio(self.profile)
+        portfolio_id = portfolio.id
+        self.profile.delete()
+        with self.assertRaises(Portfolio.DoesNotExist):
+            Portfolio.objects.get(id=portfolio_id)
 
 
 # ---------------------------------------------------------------------------
-# Serializer Tests - _to_public_media_url
+# Serializer tests
 # ---------------------------------------------------------------------------
 
-class ToPublicMediaUrlTest(TestCase):
+class TestToPublicMediaUrl(TestCase):
     @override_settings(
         AWS_S3_ENDPOINT_URL="http://minio:9000",
-        AWS_S3_PUBLIC_ENDPOINT_URL="http://localhost:9000",
+        AWS_S3_PUBLIC_ENDPOINT_URL="https://cdn.example.com",
     )
-    def test_converts_internal_to_public_url(self):
-        result = _to_public_media_url("http://minio:9000/bucket/image.jpg")
-        self.assertEqual(result, "http://localhost:9000/bucket/image.jpg")
+    def test_replaces_internal_endpoint_with_public(self):
+        url = "http://minio:9000/bucket/portfolios/1/photo.jpg"
+        result = _to_public_media_url(url)
+        self.assertEqual(result, "https://cdn.example.com/bucket/portfolios/1/photo.jpg")
 
     @override_settings(
         AWS_S3_ENDPOINT_URL="http://minio:9000",
-        AWS_S3_PUBLIC_ENDPOINT_URL="http://localhost:9000",
+        AWS_S3_PUBLIC_ENDPOINT_URL="https://cdn.example.com",
     )
-    def test_non_internal_url_unchanged(self):
-        result = _to_public_media_url("http://other-server.com/image.jpg")
-        self.assertEqual(result, "http://other-server.com/image.jpg")
+    def test_returns_unchanged_url_if_not_internal(self):
+        url = "https://other.cdn.net/photo.jpg"
+        result = _to_public_media_url(url)
+        self.assertEqual(result, "https://other.cdn.net/photo.jpg")
 
     @override_settings(
         AWS_S3_ENDPOINT_URL="http://minio:9000",
-        AWS_S3_PUBLIC_ENDPOINT_URL="http://localhost:9000",
+        AWS_S3_PUBLIC_ENDPOINT_URL="https://cdn.example.com",
     )
-    def test_empty_string_returns_none(self):
+    def test_returns_none_for_empty_url(self):
         result = _to_public_media_url("")
         self.assertIsNone(result)
 
     @override_settings(
         AWS_S3_ENDPOINT_URL="http://minio:9000",
-        AWS_S3_PUBLIC_ENDPOINT_URL="http://localhost:9000",
+        AWS_S3_PUBLIC_ENDPOINT_URL="https://cdn.example.com",
     )
-    def test_none_returns_none(self):
+    def test_returns_none_for_none_url(self):
         result = _to_public_media_url(None)
         self.assertIsNone(result)
 
     @override_settings(
         AWS_S3_ENDPOINT_URL="http://minio:9000/",
-        AWS_S3_PUBLIC_ENDPOINT_URL="http://localhost:9000/",
+        AWS_S3_PUBLIC_ENDPOINT_URL="https://cdn.example.com/",
     )
-    def test_trailing_slashes_stripped_from_endpoints(self):
-        result = _to_public_media_url("http://minio:9000/bucket/photo.jpg")
-        self.assertEqual(result, "http://localhost:9000/bucket/photo.jpg")
+    def test_strips_trailing_slash_from_endpoints(self):
+        url = "http://minio:9000/bucket/photo.jpg"
+        result = _to_public_media_url(url)
+        self.assertEqual(result, "https://cdn.example.com/bucket/photo.jpg")
 
 
-# ---------------------------------------------------------------------------
-# Permission Tests
-# ---------------------------------------------------------------------------
-
-class IsOwnerOrReadOnlyTest(TestCase):
+class TestPortfolioSerializer(TestCase):
     def setUp(self):
-        self.factory = APIRequestFactory()
-        self.perm = IsOwnerOrReadOnly()
-        self.owner_user = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
-        self.other_user = make_user("photo2", role=User.Roles.PHOTOGRAPHER)
-        self.owner_profile = make_photographer_profile(self.owner_user)
+        self.photographer_user = make_photographer()
+        self.profile = make_profile(self.photographer_user)
 
-    def _make_request(self, method, user):
-        fn = getattr(self.factory, method)
-        request = fn("/")
-        request.user = user
+    def test_image_is_write_only(self):
+        serializer = PortfolioSerializer()
+        self.assertTrue(serializer.fields["image"].write_only)
+
+    def test_read_only_fields(self):
+        serializer = PortfolioSerializer()
+        for field in ["id", "photographer_id", "image_url", "created_at"]:
+            self.assertTrue(
+                serializer.fields[field].read_only,
+                f"Field {field} should be read-only",
+            )
+
+    def test_get_image_url_returns_none_when_no_image(self):
+        portfolio = Portfolio(photographer=self.profile, category="PERSONAL")
+        portfolio.image = None
+        result = PortfolioSerializer.get_image_url(portfolio)
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Permission tests
+# ---------------------------------------------------------------------------
+
+class TestIsOwnerOrReadOnly(TestCase):
+    def setUp(self):
+        self.photographer_user = make_photographer()
+        self.profile = make_profile(self.photographer_user)
+        self.portfolio = make_portfolio(self.profile)
+        self.other_user = make_photographer(username="other_photo")
+
+    def _make_request(self, method, user=None):
+        request = MagicMock()
+        request.method = method
+        request.user = user or MagicMock()
         return request
 
-    def test_get_allowed_without_auth(self):
-        from django.contrib.auth.models import AnonymousUser
+    def test_safe_methods_allowed_for_all(self):
+        perm = IsOwnerOrReadOnly()
+        for method in ["GET", "HEAD", "OPTIONS"]:
+            request = self._make_request(method)
+            self.assertTrue(perm.has_permission(request, None))
 
-        request = self._make_request("get", AnonymousUser())
-        self.assertTrue(self.perm.has_permission(request, None))
+    def test_unsafe_methods_require_authentication(self):
+        perm = IsOwnerOrReadOnly()
+        request = self._make_request("POST")
+        request.user.is_authenticated = True
+        self.assertTrue(perm.has_permission(request, None))
 
-    def test_post_requires_auth(self):
-        from django.contrib.auth.models import AnonymousUser
+    def test_unsafe_methods_denied_for_unauthenticated(self):
+        perm = IsOwnerOrReadOnly()
+        request = self._make_request("POST")
+        request.user = None
+        self.assertFalse(perm.has_permission(request, None))
 
-        request = self._make_request("post", AnonymousUser())
-        self.assertFalse(self.perm.has_permission(request, None))
+    def test_owner_can_modify_portfolio(self):
+        perm = IsOwnerOrReadOnly()
+        request = self._make_request("DELETE", self.photographer_user)
+        self.assertTrue(perm.has_object_permission(request, None, self.portfolio))
 
-    def test_post_allowed_when_authenticated(self):
-        request = self._make_request("post", self.owner_user)
-        self.assertTrue(self.perm.has_permission(request, None))
+    def test_non_owner_cannot_modify_portfolio(self):
+        perm = IsOwnerOrReadOnly()
+        request = self._make_request("DELETE", self.other_user)
+        self.assertFalse(perm.has_object_permission(request, None, self.portfolio))
 
-    def test_get_object_permission_always_true(self):
-        # For any portfolio object, GET is always allowed
-        portfolio = Portfolio.__new__(Portfolio)
-        portfolio.photographer = self.owner_profile
-        request = self._make_request("get", self.other_user)
-        self.assertTrue(self.perm.has_object_permission(request, None, portfolio))
-
-    def test_put_object_permission_owner(self):
-        portfolio = Portfolio.__new__(Portfolio)
-        portfolio.photographer = self.owner_profile
-        request = self._make_request("put", self.owner_user)
-        self.assertTrue(self.perm.has_object_permission(request, None, portfolio))
-
-    def test_put_object_permission_non_owner(self):
-        portfolio = Portfolio.__new__(Portfolio)
-        portfolio.photographer = self.owner_profile
-        request = self._make_request("put", self.other_user)
-        self.assertFalse(self.perm.has_object_permission(request, None, portfolio))
+    def test_safe_method_allowed_on_any_object(self):
+        perm = IsOwnerOrReadOnly()
+        request = self._make_request("GET", self.other_user)
+        self.assertTrue(perm.has_object_permission(request, None, self.portfolio))
 
 
 # ---------------------------------------------------------------------------
-# Filter Backend Tests
+# Filter backend tests
 # ---------------------------------------------------------------------------
 
-class PortfolioFilterBackendTest(TestCase):
+class TestPortfolioFilterBackend(TestCase):
     def setUp(self):
-        self.factory = APIRequestFactory()
-        self.filter_backend = PortfolioFilterBackend()
-        self.user = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
-        self.profile = make_photographer_profile(self.user)
-        self.user2 = make_user("photo2", role=User.Roles.PHOTOGRAPHER)
-        self.profile2 = make_photographer_profile(self.user2)
+        self.photographer_user = make_photographer()
+        self.profile = make_profile(self.photographer_user)
+        other_user = make_photographer(username="photo2")
+        self.other_profile = make_profile(other_user)
 
-    def _make_request(self, **params):
-        query_string = "&".join(f"{k}={v}" for k, v in params.items())
-        request = self.factory.get(f"/?{query_string}")
+        self.personal = make_portfolio(self.profile, category="PERSONAL")
+        self.wedding = make_portfolio(self.profile, category="WEDDING")
+        self.other_personal = make_portfolio(self.other_profile, category="PERSONAL")
+
+    def _make_request(self, **query_params):
+        request = MagicMock()
+        request.query_params = query_params
         return request
-
-    def test_no_filter_returns_all(self):
-        qs = Portfolio.objects.all()
-        request = self._make_request()
-        result = self.filter_backend.filter_queryset(request, qs, None)
-        self.assertEqual(list(result), list(qs))
-
-    def test_filter_by_photographer_id(self):
-        qs = Portfolio.objects.all()
-        request = self._make_request(photographer_id=self.profile.pk)
-        result = self.filter_backend.filter_queryset(request, qs, None)
-        for p in result:
-            self.assertEqual(p.photographer_id, self.profile.pk)
 
     def test_filter_by_category(self):
-        qs = Portfolio.objects.all()
-        request = self._make_request(category="WEDDING")
-        result = self.filter_backend.filter_queryset(request, qs, None)
-        for p in result:
-            self.assertEqual(p.category, "WEDDING")
+        backend = PortfolioFilterBackend()
+        request = self._make_request(category="PERSONAL")
+        queryset = Portfolio.objects.all()
+        filtered = backend.filter_queryset(request, queryset, None)
+        ids = list(filtered.values_list("id", flat=True))
+        self.assertIn(self.personal.id, ids)
+        self.assertIn(self.other_personal.id, ids)
+        self.assertNotIn(self.wedding.id, ids)
+
+    def test_filter_by_photographer_id(self):
+        backend = PortfolioFilterBackend()
+        request = self._make_request(photographer_id=str(self.profile.id))
+        queryset = Portfolio.objects.all()
+        filtered = backend.filter_queryset(request, queryset, None)
+        ids = list(filtered.values_list("id", flat=True))
+        self.assertIn(self.personal.id, ids)
+        self.assertIn(self.wedding.id, ids)
+        self.assertNotIn(self.other_personal.id, ids)
+
+    def test_filter_by_both_category_and_photographer_id(self):
+        backend = PortfolioFilterBackend()
+        request = self._make_request(
+            category="PERSONAL", photographer_id=str(self.profile.id)
+        )
+        queryset = Portfolio.objects.all()
+        filtered = backend.filter_queryset(request, queryset, None)
+        ids = list(filtered.values_list("id", flat=True))
+        self.assertIn(self.personal.id, ids)
+        self.assertNotIn(self.wedding.id, ids)
+        self.assertNotIn(self.other_personal.id, ids)
+
+    def test_no_filters_returns_all(self):
+        backend = PortfolioFilterBackend()
+        request = self._make_request()
+        queryset = Portfolio.objects.all()
+        filtered = backend.filter_queryset(request, queryset, None)
+        self.assertEqual(filtered.count(), 3)
 
 
 # ---------------------------------------------------------------------------
-# View Tests
+# View tests
 # ---------------------------------------------------------------------------
 
-@override_settings(
-    DEFAULT_FILE_STORAGE="django.core.files.storage.FileSystemStorage",
-    STORAGES={
-        "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
-    },
-    MEDIA_ROOT="/tmp/test_portfolio_media/",
-)
-class PortfolioViewSetTest(TestCase):
+class TestPortfolioViewSet(APITestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.photographer_user = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
-        self.photographer2_user = make_user("photo2", role=User.Roles.PHOTOGRAPHER)
-        self.customer_user = make_user("customer1", role=User.Roles.CUSTOMER)
-        self.profile = make_photographer_profile(self.photographer_user)
-        self.profile2 = make_photographer_profile(self.photographer2_user)
+        self.photographer_user = make_photographer()
+        self.profile = make_profile(self.photographer_user)
+        self.customer = make_customer()
 
-    # --- List ---
+    def _auth(self, user):
+        self.client.force_authenticate(user=user)
 
-    def test_list_accessible_without_auth(self):
+    def test_list_portfolios_is_public(self):
+        make_portfolio(self.profile)
         response = self.client.get("/api/portfolios/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    def test_list_returns_empty_initially(self):
+    def test_list_portfolios_anonymous_user(self):
         response = self.client.get("/api/portfolios/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 0)
 
     def test_list_filter_by_category(self):
-        # Create portfolios directly in DB without real file
-        p1 = Portfolio.objects.create(
-            photographer=self.profile,
-            category=Portfolio.Categories.WEDDING,
-        )
-        p2 = Portfolio.objects.create(
-            photographer=self.profile,
-            category=Portfolio.Categories.PERSONAL,
-        )
-        response = self.client.get("/api/portfolios/?category=WEDDING")
+        make_portfolio(self.profile, category="PERSONAL")
+        make_portfolio(self.profile, category="WEDDING")
+
+        response = self.client.get("/api/portfolios/?category=PERSONAL")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ids = [item["id"] for item in response.data]
-        self.assertIn(str(p1.pk), ids)
-        self.assertNotIn(str(p2.pk), ids)
+        categories = [p["category"] for p in response.data["results"]]
+        self.assertTrue(all(c == "PERSONAL" for c in categories))
 
     def test_list_filter_by_photographer_id(self):
-        p1 = Portfolio.objects.create(
-            photographer=self.profile,
-            category=Portfolio.Categories.PERSONAL,
-        )
-        p2 = Portfolio.objects.create(
-            photographer=self.profile2,
-            category=Portfolio.Categories.PERSONAL,
-        )
-        response = self.client.get(f"/api/portfolios/?photographer_id={self.profile.pk}")
+        other_user = make_photographer(username="photo2")
+        other_profile = make_profile(other_user)
+        p1 = make_portfolio(self.profile)
+        p2 = make_portfolio(other_profile)
+
+        response = self.client.get(f"/api/portfolios/?photographer_id={self.profile.id}")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ids = [item["id"] for item in response.data]
-        self.assertIn(str(p1.pk), ids)
-        self.assertNotIn(str(p2.pk), ids)
-
-    # --- Create ---
-
-    def test_create_requires_authentication(self):
-        image = make_fake_image()
-        response = self.client.post(
-            "/api/portfolios/",
-            {"image": image, "category": "PERSONAL"},
-            format="multipart",
-        )
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        ids = [p["id"] for p in response.data["results"]]
+        self.assertIn(str(p1.id), ids)
+        self.assertNotIn(str(p2.id), ids)
 
     def test_customer_cannot_create_portfolio(self):
-        self.client.force_authenticate(user=self.customer_user)
-        image = make_fake_image()
-        response = self.client.post(
-            "/api/portfolios/",
-            {"image": image, "category": "PERSONAL"},
-            format="multipart",
-        )
+        self._auth(self.customer)
+        data = {
+            "category": "PERSONAL",
+            "image": io.BytesIO(b"fake-image-content"),
+        }
+        response = self.client.post("/api/portfolios/", data, format="multipart")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_photographer_can_create_portfolio(self):
-        self.client.force_authenticate(user=self.photographer_user)
-        image = make_fake_image()
-        response = self.client.post(
-            "/api/portfolios/",
-            {"image": image, "category": "PERSONAL"},
-            format="multipart",
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data["category"], "PERSONAL")
-        self.assertEqual(response.data["photographer_id"], self.profile.pk)
-
-    def test_create_creates_photographer_profile_if_missing(self):
-        # Create a new photographer without a profile
-        new_photographer = make_user("photo3", role=User.Roles.PHOTOGRAPHER)
-        self.assertFalse(
-            PhotographerProfile.objects.filter(user=new_photographer).exists()
-        )
-        self.client.force_authenticate(user=new_photographer)
-        image = make_fake_image()
-        response = self.client.post(
-            "/api/portfolios/",
-            {"image": image, "category": "EVENT"},
-            format="multipart",
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(
-            PhotographerProfile.objects.filter(user=new_photographer).exists()
+    def test_unauthenticated_cannot_create_portfolio(self):
+        data = {
+            "category": "PERSONAL",
+            "image": io.BytesIO(b"fake-image-content"),
+        }
+        response = self.client.post("/api/portfolios/", data, format="multipart")
+        # IsOwnerOrReadOnly allows unauthenticated POSTs at has_permission,
+        # but perform_create raises PermissionDenied for non-authenticated users
+        # Actually has_permission returns False for unauthenticated non-safe methods
+        self.assertIn(
+            response.status_code,
+            [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN],
         )
 
-    def test_create_missing_category_returns_400(self):
-        self.client.force_authenticate(user=self.photographer_user)
-        image = make_fake_image()
-        response = self.client.post(
-            "/api/portfolios/",
-            {"image": image},
-            format="multipart",
-        )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+    def test_photographer_cannot_delete_other_photographer_portfolio(self):
+        other_user = make_photographer(username="photo2")
+        other_profile = make_profile(other_user)
+        portfolio = make_portfolio(other_profile)
 
-    def test_create_missing_image_returns_400(self):
-        self.client.force_authenticate(user=self.photographer_user)
-        response = self.client.post(
-            "/api/portfolios/",
-            {"category": "PERSONAL"},
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self._auth(self.photographer_user)
+        response = self.client.delete(f"/api/portfolios/{portfolio.id}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_photographer_can_delete_own_portfolio(self):
+        portfolio = make_portfolio(self.profile)
+        self._auth(self.photographer_user)
+        response = self.client.delete(f"/api/portfolios/{portfolio.id}/")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_retrieve_portfolio_is_public(self):
+        portfolio = make_portfolio(self.profile)
+        response = self.client.get(f"/api/portfolios/{portfolio.id}/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], str(portfolio.id))

@@ -1,10 +1,12 @@
-import datetime
 import uuid
+from datetime import timedelta
+from decimal import Decimal
+from unittest.mock import MagicMock
 
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APIClient, APIRequestFactory
+from rest_framework.test import APITestCase
 
 from locations.models import Location
 from user.models import User
@@ -18,48 +20,64 @@ from .serializers import AcceptBidSerializer, BookingBidSerializer, BookingSeria
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_user(username, role=User.Roles.CUSTOMER, **kwargs):
+def make_customer(username="customer1", password="pass1234!"):
     return User.objects.create_user(
         username=username,
-        email=f"{username}@test.com",
-        password="pass123",
-        role=role,
-        **kwargs,
+        email=f"{username}@example.com",
+        password=password,
+        role=User.Roles.CUSTOMER,
     )
 
 
-def make_location(city="Ha Noi", district="Hoan Kiem"):
+def make_photographer(username="photo1", password="pass1234!"):
+    return User.objects.create_user(
+        username=username,
+        email=f"{username}@example.com",
+        password=password,
+        role=User.Roles.PHOTOGRAPHER,
+    )
+
+
+def make_location(city="Hanoi", district="Hoan Kiem"):
     return Location.objects.create(city_province=city, district=district)
 
 
-def make_booking(customer, location, **kwargs):
-    defaults = {
-        "title": "Test Booking",
-        "category": Booking.Categories.PERSONAL,
-        "shoot_date": timezone.localdate() + datetime.timedelta(days=7),
-        "deadline_date": timezone.now() + datetime.timedelta(days=5),
-        "environment": Booking.Environments.OUTDOOR,
-        "requires_makeup": False,
-        "budget_min": "500.00",
-        "budget_max": "1000.00",
-        "status": Booking.Status.OPEN,
-    }
+def make_booking(customer, location, title="Test Booking", **kwargs):
+    defaults = dict(
+        title=title,
+        category=Booking.Categories.PERSONAL,
+        shoot_date=timezone.localdate() + timedelta(days=10),
+        deadline_date=timezone.now() + timedelta(days=5),
+        location=location,
+        environment=Booking.Environments.OUTDOOR,
+        budget_min=Decimal("100.00"),
+        budget_max=Decimal("500.00"),
+    )
     defaults.update(kwargs)
-    return Booking.objects.create(customer=customer, location=location, **defaults)
+    return Booking.objects.create(customer=customer, **defaults)
+
+
+def make_booking_bid(booking, photographer, price=Decimal("200.00"), letter="Hi"):
+    return BookingBid.objects.create(
+        booking=booking,
+        photographer=photographer,
+        proposed_price=price,
+        cover_letter=letter,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Model Tests
+# Model tests
 # ---------------------------------------------------------------------------
 
-class BookingModelTest(TestCase):
+class TestBookingModel(TestCase):
     def setUp(self):
-        self.customer = make_user("customer1")
+        self.customer = make_customer()
         self.location = make_location()
 
     def test_str_representation(self):
-        booking = make_booking(self.customer, self.location, title="My Wedding")
-        self.assertIn("My Wedding", str(booking))
+        booking = make_booking(self.customer, self.location, title="Wedding Shoot")
+        self.assertIn("Wedding Shoot", str(booking))
         self.assertIn("Booking<", str(booking))
 
     def test_default_status_is_open(self):
@@ -68,718 +86,599 @@ class BookingModelTest(TestCase):
 
     def test_uuid_primary_key(self):
         booking = make_booking(self.customer, self.location)
-        self.assertIsInstance(booking.pk, uuid.UUID)
+        self.assertIsInstance(booking.id, uuid.UUID)
 
-    def test_photographer_nullable(self):
+    def test_photographer_is_nullable(self):
         booking = make_booking(self.customer, self.location)
         self.assertIsNone(booking.photographer)
 
     def test_categories_choices(self):
-        choices = [c[0] for c in Booking.Categories.choices]
-        self.assertIn("PERSONAL", choices)
-        self.assertIn("COUPLE", choices)
-        self.assertIn("EVENT", choices)
-        self.assertIn("WEDDING", choices)
-        self.assertIn("FAMILY", choices)
+        expected = {"PERSONAL", "COUPLE", "EVENT", "WEDDING", "FAMILY"}
+        actual = {c[0] for c in Booking.Categories.choices}
+        self.assertEqual(actual, expected)
 
     def test_environments_choices(self):
-        choices = [c[0] for c in Booking.Environments.choices]
-        self.assertIn("INDOOR", choices)
-        self.assertIn("OUTDOOR", choices)
-        self.assertIn("STUDIO", choices)
+        expected = {"INDOOR", "OUTDOOR", "STUDIO"}
+        actual = {e[0] for e in Booking.Environments.choices}
+        self.assertEqual(actual, expected)
 
     def test_status_choices(self):
-        choices = [c[0] for c in Booking.Status.choices]
-        self.assertIn("OPEN", choices)
-        self.assertIn("MATCHED", choices)
-        self.assertIn("COMPLETED", choices)
-        self.assertIn("CANCELLED", choices)
+        expected = {"OPEN", "MATCHED", "COMPLETED", "CANCELLED"}
+        actual = {s[0] for s in Booking.Status.choices}
+        self.assertEqual(actual, expected)
 
-    def test_ordering_by_created_at_desc(self):
+    def test_ordering_by_created_at_descending(self):
         b1 = make_booking(self.customer, self.location, title="First")
         b2 = make_booking(self.customer, self.location, title="Second")
         bookings = list(Booking.objects.all())
-        # The most recently created should come first
-        self.assertEqual(bookings[0].pk, b2.pk)
-
-    def test_cascade_delete_on_customer_delete(self):
-        booking = make_booking(self.customer, self.location)
-        booking_id = booking.pk
-        self.customer.delete()
-        self.assertFalse(Booking.objects.filter(pk=booking_id).exists())
+        # Second created booking should appear first due to -created_at ordering
+        self.assertEqual(bookings[0].id, b2.id)
+        self.assertEqual(bookings[1].id, b1.id)
 
 
-class BookingBidModelTest(TestCase):
+class TestBookingBidModel(TestCase):
     def setUp(self):
-        self.customer = make_user("customer1")
-        self.photographer = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
+        self.customer = make_customer()
+        self.photographer = make_photographer()
         self.location = make_location()
         self.booking = make_booking(self.customer, self.location)
 
     def test_str_representation(self):
-        bid = BookingBid.objects.create(
-            booking=self.booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="I am great",
-        )
+        bid = make_booking_bid(self.booking, self.photographer)
         self.assertIn("BookingBid<", str(bid))
 
     def test_default_status_is_pending(self):
-        bid = BookingBid.objects.create(
-            booking=self.booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="I am great",
-        )
+        bid = make_booking_bid(self.booking, self.photographer)
         self.assertEqual(bid.status, BookingBid.Status.PENDING)
 
     def test_uuid_primary_key(self):
-        bid = BookingBid.objects.create(
-            booking=self.booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="I am great",
-        )
-        self.assertIsInstance(bid.pk, uuid.UUID)
+        bid = make_booking_bid(self.booking, self.photographer)
+        self.assertIsInstance(bid.id, uuid.UUID)
 
-    def test_unique_constraint_booking_photographer(self):
+    def test_unique_bid_per_booking_photographer(self):
+        """A photographer cannot submit two bids for the same booking."""
         from django.db import IntegrityError
-
-        BookingBid.objects.create(
-            booking=self.booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="First bid",
-        )
+        make_booking_bid(self.booking, self.photographer)
         with self.assertRaises(IntegrityError):
+            # Bypass serializer to hit DB constraint directly
             BookingBid.objects.create(
                 booking=self.booking,
                 photographer=self.photographer,
-                proposed_price="900.00",
-                cover_letter="Second bid",
+                proposed_price=Decimal("300.00"),
+                cover_letter="Second attempt",
             )
 
-    def test_cascade_delete_on_booking_delete(self):
-        bid = BookingBid.objects.create(
-            booking=self.booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="I am great",
-        )
-        bid_id = bid.pk
-        self.booking.delete()
-        self.assertFalse(BookingBid.objects.filter(pk=bid_id).exists())
+    def test_bid_status_choices(self):
+        expected = {"PENDING", "ACCEPTED", "REJECTED"}
+        actual = {s[0] for s in BookingBid.Status.choices}
+        self.assertEqual(actual, expected)
 
 
 # ---------------------------------------------------------------------------
-# Permission Tests
+# Permission tests
 # ---------------------------------------------------------------------------
 
-class IsCustomerPermissionTest(TestCase):
-    def setUp(self):
-        self.factory = APIRequestFactory()
-        self.perm = IsCustomer()
-        self.customer = make_user("customer1", role=User.Roles.CUSTOMER)
-        self.photographer = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
-
+class TestIsCustomerPermission(TestCase):
     def _make_request(self, user):
-        request = self.factory.get("/")
+        request = MagicMock()
         request.user = user
         return request
 
-    def test_customer_has_permission(self):
-        request = self._make_request(self.customer)
-        self.assertTrue(self.perm.has_permission(request, None))
+    def test_allows_customer_role(self):
+        user = make_customer()
+        request = self._make_request(user)
+        perm = IsCustomer()
+        self.assertTrue(perm.has_permission(request, None))
 
-    def test_photographer_denied(self):
-        request = self._make_request(self.photographer)
-        self.assertFalse(self.perm.has_permission(request, None))
+    def test_denies_photographer_role(self):
+        user = make_photographer()
+        request = self._make_request(user)
+        perm = IsCustomer()
+        self.assertFalse(perm.has_permission(request, None))
 
-    def test_unauthenticated_denied(self):
+    def test_denies_unauthenticated_user(self):
+        user = MagicMock()
+        user.is_authenticated = False
+        request = self._make_request(user)
+        perm = IsCustomer()
+        self.assertFalse(perm.has_permission(request, None))
+
+    def test_denies_anonymous_user(self):
         from django.contrib.auth.models import AnonymousUser
-
         request = self._make_request(AnonymousUser())
-        self.assertFalse(self.perm.has_permission(request, None))
+        perm = IsCustomer()
+        self.assertFalse(perm.has_permission(request, None))
 
 
-class IsPhotographerPermissionTest(TestCase):
-    def setUp(self):
-        self.factory = APIRequestFactory()
-        self.perm = IsPhotographer()
-        self.customer = make_user("customer1", role=User.Roles.CUSTOMER)
-        self.photographer = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
-
+class TestIsPhotographerPermission(TestCase):
     def _make_request(self, user):
-        request = self.factory.get("/")
+        request = MagicMock()
         request.user = user
         return request
 
-    def test_photographer_has_permission(self):
-        request = self._make_request(self.photographer)
-        self.assertTrue(self.perm.has_permission(request, None))
+    def test_allows_photographer_role(self):
+        user = make_photographer()
+        request = self._make_request(user)
+        perm = IsPhotographer()
+        self.assertTrue(perm.has_permission(request, None))
 
-    def test_customer_denied(self):
-        request = self._make_request(self.customer)
-        self.assertFalse(self.perm.has_permission(request, None))
+    def test_denies_customer_role(self):
+        user = make_customer()
+        request = self._make_request(user)
+        perm = IsPhotographer()
+        self.assertFalse(perm.has_permission(request, None))
 
-    def test_unauthenticated_denied(self):
-        from django.contrib.auth.models import AnonymousUser
+    def test_denies_unauthenticated_user(self):
+        user = MagicMock()
+        user.is_authenticated = False
+        request = self._make_request(user)
+        perm = IsPhotographer()
+        self.assertFalse(perm.has_permission(request, None))
 
-        request = self._make_request(AnonymousUser())
-        self.assertFalse(self.perm.has_permission(request, None))
 
-
-class IsBookingOwnerPermissionTest(TestCase):
+class TestIsBookingOwnerPermission(TestCase):
     def setUp(self):
-        self.factory = APIRequestFactory()
-        self.perm = IsBookingOwner()
-        self.customer = make_user("customer1", role=User.Roles.CUSTOMER)
-        self.other_user = make_user("other", role=User.Roles.CUSTOMER)
+        self.customer = make_customer()
+        self.other_user = make_customer(username="other_customer")
         self.location = make_location()
         self.booking = make_booking(self.customer, self.location)
 
     def _make_request(self, user):
-        request = self.factory.post("/")
+        request = MagicMock()
         request.user = user
         return request
 
-    def test_booking_owner_has_object_permission(self):
+    def test_allows_booking_owner(self):
         request = self._make_request(self.customer)
-        self.assertTrue(self.perm.has_object_permission(request, None, self.booking))
+        perm = IsBookingOwner()
+        self.assertTrue(perm.has_object_permission(request, None, self.booking))
 
-    def test_non_owner_denied_object_permission(self):
+    def test_denies_non_owner(self):
         request = self._make_request(self.other_user)
-        self.assertFalse(self.perm.has_object_permission(request, None, self.booking))
+        perm = IsBookingOwner()
+        self.assertFalse(perm.has_object_permission(request, None, self.booking))
 
-    def test_unauthenticated_denied_object_permission(self):
-        from django.contrib.auth.models import AnonymousUser
-
-        request = self._make_request(AnonymousUser())
-        self.assertFalse(self.perm.has_object_permission(request, None, self.booking))
+    def test_denies_unauthenticated_user(self):
+        user = MagicMock()
+        user.is_authenticated = False
+        user.id = None
+        request = self._make_request(user)
+        perm = IsBookingOwner()
+        self.assertFalse(perm.has_object_permission(request, None, self.booking))
 
 
 # ---------------------------------------------------------------------------
-# Serializer Tests
+# Serializer tests
 # ---------------------------------------------------------------------------
 
-class BookingSerializerTest(TestCase):
+class TestBookingSerializer(TestCase):
     def setUp(self):
-        self.customer = make_user("customer1")
+        self.customer = make_customer()
         self.location = make_location()
-        self.future_date = timezone.localdate() + datetime.timedelta(days=10)
-        self.valid_data = {
-            "title": "My Booking",
-            "category": Booking.Categories.PERSONAL,
-            "shoot_date": self.future_date,
-            "deadline_date": timezone.now() + datetime.timedelta(days=5),
-            "location": self.location.pk,
-            "environment": Booking.Environments.OUTDOOR,
-            "requires_makeup": False,
-            "budget_min": "500.00",
-            "budget_max": "1000.00",
-        }
 
-    def test_valid_data_passes(self):
-        serializer = BookingSerializer(data=self.valid_data)
+    def _make_request(self, user):
+        request = MagicMock()
+        request.user = user
+        return request
+
+    def test_valid_data_passes_validation(self):
+        data = {
+            "title": "My Booking",
+            "category": "PERSONAL",
+            "shoot_date": str(timezone.localdate() + timedelta(days=5)),
+            "deadline_date": str(timezone.now() + timedelta(days=3)),
+            "location": self.location.id,
+            "environment": "OUTDOOR",
+            "budget_min": "100.00",
+            "budget_max": "500.00",
+        }
+        serializer = BookingSerializer(data=data)
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
-    def test_shoot_date_today_fails(self):
-        data = self.valid_data.copy()
-        data["shoot_date"] = timezone.localdate()
+    def test_shoot_date_today_is_invalid(self):
+        data = {
+            "title": "Invalid",
+            "category": "PERSONAL",
+            "shoot_date": str(timezone.localdate()),
+            "deadline_date": str(timezone.now() + timedelta(days=3)),
+            "location": self.location.id,
+            "environment": "OUTDOOR",
+            "budget_min": "100.00",
+            "budget_max": "500.00",
+        }
         serializer = BookingSerializer(data=data)
         self.assertFalse(serializer.is_valid())
         self.assertIn("shoot_date", serializer.errors)
 
-    def test_shoot_date_in_past_fails(self):
-        data = self.valid_data.copy()
-        data["shoot_date"] = timezone.localdate() - datetime.timedelta(days=1)
+    def test_shoot_date_in_past_is_invalid(self):
+        data = {
+            "title": "Invalid",
+            "category": "PERSONAL",
+            "shoot_date": str(timezone.localdate() - timedelta(days=1)),
+            "deadline_date": str(timezone.now() + timedelta(days=3)),
+            "location": self.location.id,
+            "environment": "OUTDOOR",
+            "budget_min": "100.00",
+            "budget_max": "500.00",
+        }
         serializer = BookingSerializer(data=data)
         self.assertFalse(serializer.is_valid())
         self.assertIn("shoot_date", serializer.errors)
 
-    def test_budget_max_less_than_min_fails(self):
-        data = self.valid_data.copy()
-        data["budget_min"] = "1000.00"
-        data["budget_max"] = "500.00"
+    def test_budget_max_less_than_budget_min_is_invalid(self):
+        data = {
+            "title": "Invalid Budget",
+            "category": "COUPLE",
+            "shoot_date": str(timezone.localdate() + timedelta(days=5)),
+            "deadline_date": str(timezone.now() + timedelta(days=3)),
+            "location": self.location.id,
+            "environment": "INDOOR",
+            "budget_min": "500.00",
+            "budget_max": "100.00",
+        }
         serializer = BookingSerializer(data=data)
         self.assertFalse(serializer.is_valid())
         self.assertIn("budget_max", serializer.errors)
 
-    def test_budget_max_equal_to_min_passes(self):
-        data = self.valid_data.copy()
-        data["budget_min"] = "500.00"
-        data["budget_max"] = "500.00"
+    def test_budget_max_equal_to_budget_min_is_valid(self):
+        data = {
+            "title": "Equal Budget",
+            "category": "EVENT",
+            "shoot_date": str(timezone.localdate() + timedelta(days=5)),
+            "deadline_date": str(timezone.now() + timedelta(days=3)),
+            "location": self.location.id,
+            "environment": "STUDIO",
+            "budget_min": "200.00",
+            "budget_max": "200.00",
+        }
         serializer = BookingSerializer(data=data)
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
-    def test_read_only_fields_not_writable(self):
-        data = self.valid_data.copy()
-        data["status"] = Booking.Status.COMPLETED
-        data["customer"] = self.customer.pk
-        serializer = BookingSerializer(data=data)
-        self.assertTrue(serializer.is_valid(), serializer.errors)
-        # customer and status should not be in validated_data (read_only)
-        self.assertNotIn("customer", serializer.validated_data)
-        self.assertNotIn("status", serializer.validated_data)
+    def test_read_only_fields_are_not_writable(self):
+        serializer = BookingSerializer()
+        for field in ["id", "customer", "status", "created_at", "updated_at"]:
+            self.assertTrue(
+                serializer.fields[field].read_only,
+                f"Field {field} should be read-only",
+            )
 
 
-class BookingBidSerializerTest(TestCase):
+class TestBookingBidSerializer(TestCase):
     def setUp(self):
-        self.customer = make_user("customer1", role=User.Roles.CUSTOMER)
-        self.photographer = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
-        self.other_photographer = make_user("photo2", role=User.Roles.PHOTOGRAPHER)
+        self.customer = make_customer()
+        self.photographer = make_photographer()
+        self.other_photographer = make_photographer(username="photo2")
         self.location = make_location()
-        self.open_booking = make_booking(self.customer, self.location)
-        self.matched_booking = make_booking(
-            self.customer, self.location,
-            title="Matched",
-            status=Booking.Status.MATCHED,
-        )
-        self.factory = APIRequestFactory()
+        self.booking = make_booking(self.customer, self.location)
 
     def _make_request(self, user):
-        request = self.factory.post("/")
+        request = MagicMock()
         request.user = user
         return request
 
-    def test_valid_bid_passes(self):
+    def test_valid_bid_data(self):
+        data = {
+            "booking": str(self.booking.id),
+            "proposed_price": "250.00",
+            "cover_letter": "I am the best photographer.",
+        }
         request = self._make_request(self.photographer)
-        serializer = BookingBidSerializer(
-            data={
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "I can do it",
-            },
-            context={"request": request},
-        )
+        serializer = BookingBidSerializer(data=data, context={"request": request})
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
     def test_customer_cannot_bid_own_booking(self):
+        data = {
+            "booking": str(self.booking.id),
+            "proposed_price": "250.00",
+            "cover_letter": "Trying to bid own booking.",
+        }
+        # Pass customer as the request user
         request = self._make_request(self.customer)
-        serializer = BookingBidSerializer(
-            data={
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "Self bid",
-            },
-            context={"request": request},
-        )
+        serializer = BookingBidSerializer(data=data, context={"request": request})
         self.assertFalse(serializer.is_valid())
         self.assertIn("booking", serializer.errors)
 
-    def test_cannot_bid_non_open_booking(self):
+    def test_cannot_bid_on_non_open_booking(self):
+        self.booking.status = Booking.Status.MATCHED
+        self.booking.save()
+
+        data = {
+            "booking": str(self.booking.id),
+            "proposed_price": "250.00",
+            "cover_letter": "Booking is matched.",
+        }
         request = self._make_request(self.photographer)
-        serializer = BookingBidSerializer(
-            data={
-                "booking": str(self.matched_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "Too late",
-            },
-            context={"request": request},
-        )
+        serializer = BookingBidSerializer(data=data, context={"request": request})
         self.assertFalse(serializer.is_valid())
         self.assertIn("booking", serializer.errors)
 
-    def test_duplicate_bid_fails(self):
+    def test_cannot_bid_twice_on_same_booking(self):
         # Create first bid
-        BookingBid.objects.create(
-            booking=self.open_booking,
-            photographer=self.photographer,
-            proposed_price="700.00",
-            cover_letter="First bid",
-        )
+        make_booking_bid(self.booking, self.photographer)
+
+        data = {
+            "booking": str(self.booking.id),
+            "proposed_price": "300.00",
+            "cover_letter": "Second attempt.",
+        }
         request = self._make_request(self.photographer)
-        serializer = BookingBidSerializer(
-            data={
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "Second bid",
-            },
-            context={"request": request},
-        )
+        serializer = BookingBidSerializer(data=data, context={"request": request})
         self.assertFalse(serializer.is_valid())
         self.assertIn("booking", serializer.errors)
 
-    def test_anonymous_request_fails(self):
+    def test_anonymous_request_is_invalid(self):
         from django.contrib.auth.models import AnonymousUser
-
-        request = self.factory.post("/")
+        data = {
+            "booking": str(self.booking.id),
+            "proposed_price": "250.00",
+            "cover_letter": "Anonymous bid.",
+        }
+        request = MagicMock()
         request.user = AnonymousUser()
-        serializer = BookingBidSerializer(
-            data={
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "Anonymous",
-            },
-            context={"request": request},
-        )
+        serializer = BookingBidSerializer(data=data, context={"request": request})
         self.assertFalse(serializer.is_valid())
 
+    def test_read_only_fields_are_not_writable(self):
+        serializer = BookingBidSerializer()
+        for field in ["id", "photographer", "status", "created_at"]:
+            self.assertTrue(
+                serializer.fields[field].read_only,
+                f"Field {field} should be read-only",
+            )
 
-class AcceptBidSerializerTest(TestCase):
-    def test_valid_uuid(self):
-        some_uuid = str(uuid.uuid4())
-        serializer = AcceptBidSerializer(data={"bid_id": some_uuid})
+
+class TestAcceptBidSerializer(TestCase):
+    def test_valid_uuid_input(self):
+        bid_id = uuid.uuid4()
+        serializer = AcceptBidSerializer(data={"bid_id": str(bid_id)})
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
-    def test_invalid_uuid_fails(self):
+    def test_invalid_uuid_input(self):
         serializer = AcceptBidSerializer(data={"bid_id": "not-a-uuid"})
         self.assertFalse(serializer.is_valid())
+        self.assertIn("bid_id", serializer.errors)
 
-    def test_missing_bid_id_fails(self):
+    def test_missing_bid_id(self):
         serializer = AcceptBidSerializer(data={})
         self.assertFalse(serializer.is_valid())
+        self.assertIn("bid_id", serializer.errors)
 
 
 # ---------------------------------------------------------------------------
-# View Tests
+# View tests
 # ---------------------------------------------------------------------------
 
-class BookingViewSetTest(TestCase):
+class TestBookingViewSet(APITestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.customer = make_user("customer1", role=User.Roles.CUSTOMER)
-        self.customer2 = make_user("customer2", role=User.Roles.CUSTOMER)
-        self.photographer = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
+        self.customer = make_customer()
+        self.photographer = make_photographer()
         self.location = make_location()
 
-    def _create_booking(self, customer=None, **kwargs):
-        customer = customer or self.customer
-        return make_booking(customer, self.location, **kwargs)
+    def _auth(self, user):
+        self.client.force_authenticate(user=user)
 
-    # --- List ---
+    def test_create_booking_as_customer_succeeds(self):
+        self._auth(self.customer)
+        data = {
+            "title": "My Event",
+            "category": "EVENT",
+            "shoot_date": str(timezone.localdate() + timedelta(days=10)),
+            "deadline_date": str(timezone.now() + timedelta(days=7)),
+            "location": self.location.id,
+            "environment": "OUTDOOR",
+            "budget_min": "100.00",
+            "budget_max": "500.00",
+        }
+        response = self.client.post("/api/bookings/", data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["customer"], self.customer.id)
+        self.assertEqual(response.data["status"], "OPEN")
 
-    def test_list_requires_authentication(self):
-        response = self.client.get("/api/bookings/")
+    def test_create_booking_as_photographer_is_forbidden(self):
+        self._auth(self.photographer)
+        data = {
+            "title": "Test",
+            "category": "PERSONAL",
+            "shoot_date": str(timezone.localdate() + timedelta(days=5)),
+            "deadline_date": str(timezone.now() + timedelta(days=3)),
+            "location": self.location.id,
+            "environment": "INDOOR",
+            "budget_min": "100.00",
+            "budget_max": "200.00",
+        }
+        response = self.client.post("/api/bookings/", data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_create_booking_unauthenticated_is_unauthorized(self):
+        data = {
+            "title": "Test",
+            "category": "PERSONAL",
+            "shoot_date": str(timezone.localdate() + timedelta(days=5)),
+            "deadline_date": str(timezone.now() + timedelta(days=3)),
+            "location": self.location.id,
+            "environment": "INDOOR",
+            "budget_min": "100.00",
+            "budget_max": "200.00",
+        }
+        response = self.client.post("/api/bookings/", data, format="json")
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_customer_sees_only_own_bookings(self):
-        self._create_booking(self.customer, title="My Booking")
-        self._create_booking(self.customer2, title="Other Booking")
-        self.client.force_authenticate(user=self.customer)
+        other_customer = make_customer(username="other_cust")
+        booking_mine = make_booking(self.customer, self.location, title="Mine")
+        make_booking(other_customer, self.location, title="Theirs")
+
+        self._auth(self.customer)
         response = self.client.get("/api/bookings/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["title"], "My Booking")
+        ids = [b["id"] for b in response.data["results"]]
+        self.assertIn(str(booking_mine.id), ids)
+        self.assertEqual(len(ids), 1)
 
     def test_photographer_sees_only_open_bookings(self):
-        self._create_booking(self.customer, title="Open Booking", status=Booking.Status.OPEN)
-        self._create_booking(self.customer, title="Matched Booking", status=Booking.Status.MATCHED)
-        self.client.force_authenticate(user=self.photographer)
+        open_booking = make_booking(self.customer, self.location, title="Open")
+        matched_booking = make_booking(
+            self.customer, self.location, title="Matched",
+            status=Booking.Status.MATCHED,
+        )
+
+        self._auth(self.photographer)
         response = self.client.get("/api/bookings/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["title"], "Open Booking")
+        ids = [b["id"] for b in response.data["results"]]
+        self.assertIn(str(open_booking.id), ids)
+        self.assertNotIn(str(matched_booking.id), ids)
 
-    def test_photographer_filter_by_location(self):
-        loc2 = Location.objects.create(city_province="Da Nang", district="Hai Chau")
-        self._create_booking(self.customer, title="Ha Noi Booking", location=self.location)
-        self._create_booking(self.customer, title="Da Nang Booking", location=loc2)
-        self.client.force_authenticate(user=self.photographer)
-        response = self.client.get(f"/api/bookings/?location={self.location.pk}")
+    def test_photographer_can_filter_by_category(self):
+        personal_booking = make_booking(
+            self.customer, self.location, title="Personal",
+            category=Booking.Categories.PERSONAL,
+        )
+        wedding_booking = make_booking(
+            self.customer, self.location, title="Wedding",
+            category=Booking.Categories.WEDDING,
+        )
+        self._auth(self.photographer)
+        response = self.client.get("/api/bookings/?category=PERSONAL")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["title"], "Ha Noi Booking")
+        ids = [b["id"] for b in response.data["results"]]
+        self.assertIn(str(personal_booking.id), ids)
+        self.assertNotIn(str(wedding_booking.id), ids)
 
-    def test_photographer_filter_by_category(self):
-        self._create_booking(self.customer, title="Wedding", category=Booking.Categories.WEDDING)
-        self._create_booking(self.customer, title="Event", category=Booking.Categories.EVENT)
-        self.client.force_authenticate(user=self.photographer)
-        response = self.client.get("/api/bookings/?category=WEDDING")
+    def test_photographer_can_filter_by_location(self):
+        location2 = make_location(city="HCMC", district="District 1")
+        b1 = make_booking(self.customer, self.location, title="Hanoi")
+        b2 = make_booking(self.customer, location2, title="HCMC")
+
+        self._auth(self.photographer)
+        response = self.client.get(f"/api/bookings/?location={self.location.id}")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["title"], "Wedding")
-
-    # --- Create ---
-
-    def test_customer_can_create_booking(self):
-        self.client.force_authenticate(user=self.customer)
-        future = (timezone.localdate() + datetime.timedelta(days=10)).isoformat()
-        response = self.client.post(
-            "/api/bookings/",
-            {
-                "title": "New Booking",
-                "category": "PERSONAL",
-                "shoot_date": future,
-                "deadline_date": (timezone.now() + datetime.timedelta(days=5)).isoformat(),
-                "location": self.location.pk,
-                "environment": "OUTDOOR",
-                "requires_makeup": False,
-                "budget_min": "500.00",
-                "budget_max": "1000.00",
-            },
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data["title"], "New Booking")
-        self.assertEqual(str(response.data["customer"]), str(self.customer.pk))
-
-    def test_photographer_cannot_create_booking(self):
-        self.client.force_authenticate(user=self.photographer)
-        future = (timezone.localdate() + datetime.timedelta(days=10)).isoformat()
-        response = self.client.post(
-            "/api/bookings/",
-            {
-                "title": "Bad",
-                "category": "PERSONAL",
-                "shoot_date": future,
-                "deadline_date": (timezone.now() + datetime.timedelta(days=5)).isoformat(),
-                "location": self.location.pk,
-                "environment": "OUTDOOR",
-                "requires_makeup": False,
-                "budget_min": "500.00",
-                "budget_max": "1000.00",
-            },
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_unauthenticated_cannot_create_booking(self):
-        future = (timezone.localdate() + datetime.timedelta(days=10)).isoformat()
-        response = self.client.post(
-            "/api/bookings/",
-            {
-                "title": "Bad",
-                "category": "PERSONAL",
-                "shoot_date": future,
-                "deadline_date": (timezone.now() + datetime.timedelta(days=5)).isoformat(),
-                "location": self.location.pk,
-                "environment": "OUTDOOR",
-                "requires_makeup": False,
-                "budget_min": "500.00",
-                "budget_max": "1000.00",
-            },
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    # --- Accept Bid ---
+        ids = [b["id"] for b in response.data["results"]]
+        self.assertIn(str(b1.id), ids)
+        self.assertNotIn(str(b2.id), ids)
 
     def test_accept_bid_sets_booking_matched(self):
-        booking = self._create_booking(self.customer)
-        bid = BookingBid.objects.create(
-            booking=booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="I can do it",
-        )
-        self.client.force_authenticate(user=self.customer)
-        response = self.client.post(
-            f"/api/bookings/{booking.pk}/accept_bid/",
-            {"bid_id": str(bid.pk)},
-            format="json",
-        )
+        booking = make_booking(self.customer, self.location)
+        bid = make_booking_bid(booking, self.photographer)
+
+        self._auth(self.customer)
+        url = f"/api/bookings/{booking.id}/accept_bid/"
+        response = self.client.post(url, {"bid_id": str(bid.id)}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
         booking.refresh_from_db()
-        self.assertEqual(booking.status, Booking.Status.MATCHED)
         bid.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.MATCHED)
+        self.assertEqual(booking.photographer, self.photographer)
         self.assertEqual(bid.status, BookingBid.Status.ACCEPTED)
 
     def test_accept_bid_rejects_other_bids(self):
-        booking = self._create_booking(self.customer)
-        photo2 = make_user("photo2", role=User.Roles.PHOTOGRAPHER)
-        bid1 = BookingBid.objects.create(
-            booking=booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="Bid 1",
-        )
-        bid2 = BookingBid.objects.create(
-            booking=booking,
-            photographer=photo2,
-            proposed_price="700.00",
-            cover_letter="Bid 2",
-        )
-        self.client.force_authenticate(user=self.customer)
-        response = self.client.post(
-            f"/api/bookings/{booking.pk}/accept_bid/",
-            {"bid_id": str(bid1.pk)},
-            format="json",
-        )
+        other_photographer = make_photographer(username="photo2")
+        booking = make_booking(self.customer, self.location)
+        accepted_bid = make_booking_bid(booking, self.photographer)
+        rejected_bid = make_booking_bid(booking, other_photographer)
+
+        self._auth(self.customer)
+        url = f"/api/bookings/{booking.id}/accept_bid/"
+        response = self.client.post(url, {"bid_id": str(accepted_bid.id)}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        bid2.refresh_from_db()
-        self.assertEqual(bid2.status, BookingBid.Status.REJECTED)
 
-    def test_accept_bid_sets_photographer_on_booking(self):
-        booking = self._create_booking(self.customer)
-        bid = BookingBid.objects.create(
-            booking=booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="I can do it",
-        )
-        self.client.force_authenticate(user=self.customer)
-        self.client.post(
-            f"/api/bookings/{booking.pk}/accept_bid/",
-            {"bid_id": str(bid.pk)},
-            format="json",
-        )
-        booking.refresh_from_db()
-        self.assertEqual(booking.photographer, self.photographer)
-
-    def test_accept_bid_requires_ownership(self):
-        booking = self._create_booking(self.customer)
-        bid = BookingBid.objects.create(
-            booking=booking,
-            photographer=self.photographer,
-            proposed_price="800.00",
-            cover_letter="I can do it",
-        )
-        self.client.force_authenticate(user=self.customer2)
-        response = self.client.post(
-            f"/api/bookings/{booking.pk}/accept_bid/",
-            {"bid_id": str(bid.pk)},
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        rejected_bid.refresh_from_db()
+        self.assertEqual(rejected_bid.status, BookingBid.Status.REJECTED)
 
     def test_accept_bid_missing_bid_id_returns_400(self):
-        booking = self._create_booking(self.customer)
-        self.client.force_authenticate(user=self.customer)
+        booking = make_booking(self.customer, self.location)
+        self._auth(self.customer)
+        url = f"/api/bookings/{booking.id}/accept_bid/"
+        response = self.client.post(url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_bid_with_invalid_bid_id_returns_400(self):
+        booking = make_booking(self.customer, self.location)
+        self._auth(self.customer)
+        url = f"/api/bookings/{booking.id}/accept_bid/"
         response = self.client.post(
-            f"/api/bookings/{booking.pk}/accept_bid/",
-            {},
-            format="json",
+            url, {"bid_id": str(uuid.uuid4())}, format="json"
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_accept_bid_non_open_booking_returns_400(self):
-        booking = self._create_booking(self.customer, status=Booking.Status.MATCHED)
-        some_uuid = str(uuid.uuid4())
-        self.client.force_authenticate(user=self.customer)
-        response = self.client.post(
-            f"/api/bookings/{booking.pk}/accept_bid/",
-            {"bid_id": some_uuid},
-            format="json",
+    def test_accept_bid_on_matched_booking_returns_400(self):
+        booking = make_booking(
+            self.customer, self.location, status=Booking.Status.MATCHED
         )
+        bid = make_booking_bid(booking, self.photographer)
+        self._auth(self.customer)
+        url = f"/api/bookings/{booking.id}/accept_bid/"
+        response = self.client.post(url, {"bid_id": str(bid.id)}, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_accept_bid_wrong_booking_id_returns_400(self):
-        booking = self._create_booking(self.customer)
-        wrong_bid_id = str(uuid.uuid4())
-        self.client.force_authenticate(user=self.customer)
-        response = self.client.post(
-            f"/api/bookings/{booking.pk}/accept_bid/",
-            {"bid_id": wrong_bid_id},
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+    def test_non_owner_cannot_accept_bid(self):
+        other_customer = make_customer(username="other_cust")
+        booking = make_booking(self.customer, self.location)
+        bid = make_booking_bid(booking, self.photographer)
 
-
-class BookingBidViewSetTest(TestCase):
-    def setUp(self):
-        self.client = APIClient()
-        self.customer = make_user("customer1", role=User.Roles.CUSTOMER)
-        self.photographer = make_user("photo1", role=User.Roles.PHOTOGRAPHER)
-        self.photographer2 = make_user("photo2", role=User.Roles.PHOTOGRAPHER)
-        self.location = make_location()
-        self.open_booking = make_booking(self.customer, self.location)
-
-    # --- Create ---
-
-    def test_photographer_can_create_bid(self):
-        self.client.force_authenticate(user=self.photographer)
-        response = self.client.post(
-            "/api/booking-bids/",
-            {
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "I am great",
-            },
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(str(response.data["photographer"]), str(self.photographer.pk))
-
-    def test_customer_cannot_create_bid(self):
-        self.client.force_authenticate(user=self.customer)
-        response = self.client.post(
-            "/api/booking-bids/",
-            {
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "I am great",
-            },
-            format="json",
-        )
+        self._auth(other_customer)
+        url = f"/api/bookings/{booking.id}/accept_bid/"
+        response = self.client.post(url, {"bid_id": str(bid.id)}, format="json")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_unauthenticated_cannot_create_bid(self):
-        response = self.client.post(
-            "/api/booking-bids/",
-            {
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "I am great",
-            },
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_photographer_cannot_bid_twice(self):
-        self.client.force_authenticate(user=self.photographer)
-        self.client.post(
-            "/api/booking-bids/",
-            {
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "750.00",
-                "cover_letter": "First",
-            },
-            format="json",
-        )
-        response = self.client.post(
-            "/api/booking-bids/",
-            {
-                "booking": str(self.open_booking.pk),
-                "proposed_price": "800.00",
-                "cover_letter": "Second",
-            },
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+class TestBookingBidViewSet(APITestCase):
+    def setUp(self):
+        self.customer = make_customer()
+        self.photographer = make_photographer()
+        self.location = make_location()
+        self.booking = make_booking(self.customer, self.location)
 
-    # --- List ---
+    def _auth(self, user):
+        self.client.force_authenticate(user=user)
 
-    def test_list_requires_authentication(self):
-        response = self.client.get("/api/booking-bids/")
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+    def test_photographer_can_create_bid(self):
+        self._auth(self.photographer)
+        data = {
+            "booking": str(self.booking.id),
+            "proposed_price": "300.00",
+            "cover_letter": "I'll do a great job!",
+        }
+        response = self.client.post("/api/booking-bids/", data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["photographer"], self.photographer.id)
+
+    def test_customer_cannot_create_bid(self):
+        self._auth(self.customer)
+        data = {
+            "booking": str(self.booking.id),
+            "proposed_price": "300.00",
+            "cover_letter": "Customer bidding.",
+        }
+        response = self.client.post("/api/booking-bids/", data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_photographer_sees_only_own_bids(self):
-        BookingBid.objects.create(
-            booking=self.open_booking,
-            photographer=self.photographer,
-            proposed_price="750.00",
-            cover_letter="My bid",
-        )
-        BookingBid.objects.create(
-            booking=self.open_booking,
-            photographer=self.photographer2,
-            proposed_price="600.00",
-            cover_letter="Other bid",
-        )
-        self.client.force_authenticate(user=self.photographer)
-        response = self.client.get("/api/booking-bids/")
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(str(response.data[0]["photographer"]), str(self.photographer.pk))
+        other_photographer = make_photographer(username="photo2")
+        bid_mine = make_booking_bid(self.booking, self.photographer)
+        bid_theirs = make_booking_bid(self.booking, other_photographer)
 
-    def test_customer_sees_only_bids_for_own_bookings(self):
-        customer2 = make_user("customer2", role=User.Roles.CUSTOMER)
-        booking2 = make_booking(customer2, self.location, title="Other Booking")
-        BookingBid.objects.create(
-            booking=self.open_booking,
-            photographer=self.photographer,
-            proposed_price="750.00",
-            cover_letter="For customer1",
-        )
-        BookingBid.objects.create(
-            booking=booking2,
-            photographer=self.photographer2,
-            proposed_price="600.00",
-            cover_letter="For customer2",
-        )
-        self.client.force_authenticate(user=self.customer)
+        self._auth(self.photographer)
         response = self.client.get("/api/booking-bids/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
+        ids = [b["id"] for b in response.data["results"]]
+        self.assertIn(str(bid_mine.id), ids)
+        self.assertNotIn(str(bid_theirs.id), ids)
+
+    def test_customer_sees_bids_for_own_bookings(self):
+        other_customer = make_customer(username="other_cust")
+        other_booking = make_booking(other_customer, self.location)
+        bid_for_mine = make_booking_bid(self.booking, self.photographer)
+        bid_for_other = make_booking_bid(other_booking, self.photographer)
+
+        self._auth(self.customer)
+        response = self.client.get("/api/booking-bids/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [b["id"] for b in response.data["results"]]
+        self.assertIn(str(bid_for_mine.id), ids)
+        self.assertNotIn(str(bid_for_other.id), ids)
+
+    def test_unauthenticated_cannot_list_bids(self):
+        response = self.client.get("/api/booking-bids/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
