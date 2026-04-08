@@ -6,3 +6,4 @@ django-storages
 boto3
 drf-spectacular
 python-dotenv
+Pillow

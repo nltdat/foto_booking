@@ -187,6 +187,7 @@ class UserMeUpdateSerializer(serializers.ModelSerializer):
 
 class PhotographerProfileSerializer(serializers.ModelSerializer):
     user = UserProfileSerializer(read_only=True)
+    active_locations = serializers.SerializerMethodField()
 
     class Meta:
         model = PhotographerProfile
@@ -198,8 +199,20 @@ class PhotographerProfileSerializer(serializers.ModelSerializer):
             "city",
             "hourly_rate",
             "experience_years",
+            "active_locations",
             "created_at",
             "updated_at",
+        ]
+
+    @staticmethod
+    def get_active_locations(obj):
+        return [
+            {
+                "id": location.id,
+                "city_province": location.city_province,
+                "district": location.district,
+            }
+            for location in obj.active_locations.all()
         ]
 
 

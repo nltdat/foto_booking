@@ -40,6 +40,11 @@ class PhotographerProfile(models.Model):
         blank=True,
     )
     experience_years = models.PositiveSmallIntegerField(default=0)
+    active_locations = models.ManyToManyField(
+        "locations.Location",
+        related_name="locations",
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
