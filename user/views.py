@@ -1,15 +1,24 @@
-from drf_spectacular.utils import (
-    extend_schema,
-)
+import logging
+
+from django.conf import settings
+from django.contrib.auth.tokens import default_token_generator
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
+from drf_spectacular.utils import extend_schema
 from rest_framework import generics, permissions, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
 
+from .email_service import EmailService
 from .models import PhotographerProfile, User
 from .permissions import IsPhotographer
 from .serializers import (
+    DeleteAccountResponseSerializer,
+    DeleteAccountSerializer,
+    ForgotPasswordResponseSerializer,
+    ForgotPasswordSerializer,
     HealthCheckSerializer,
     LoginSerializer,
     LogoutResponseSerializer,
@@ -17,10 +26,14 @@ from .serializers import (
     PhotographerProfileSerializer,
     PhotographerProfileUpdateSerializer,
     RegisterSerializer,
+    ResetPasswordResponseSerializer,
+    ResetPasswordSerializer,
     TokenPairResponseSerializer,
     UserMeUpdateSerializer,
     UserProfileSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class HealthCheckAPIView(APIView):
@@ -110,6 +123,59 @@ class LogoutAPIView(APIView):
         )
 
 
+class ForgotPasswordAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    @extend_schema(
+        tags=["Authentication"],
+        summary="Quên mật khẩu",
+        request=ForgotPasswordSerializer,
+        responses={200: ForgotPasswordResponseSerializer},
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        email = serializer.validated_data["email"].strip().lower()
+        user = User.objects.filter(email__iexact=email).first()
+
+        if user:
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = default_token_generator.make_token(user)
+            reset_link = f"{settings.FRONTEND_RESET_PASSWORD_URL}?uid={uid}&token={token}"
+            EmailService.send_password_reset_email(
+                user=user,
+                reset_link=reset_link,
+                fail_silently=True,
+            )
+        else:
+            logger.info("Password reset requested for unknown email: %s", email)
+
+        return Response(
+            {"detail": "Nếu email tồn tại, hướng dẫn đặt lại mật khẩu sẽ được gửi."},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ResetPasswordAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    @extend_schema(
+        tags=["Authentication"],
+        summary="Đặt lại mật khẩu",
+        request=ResetPasswordSerializer,
+        responses={200: ResetPasswordResponseSerializer},
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = ResetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {"detail": "Đặt lại mật khẩu thành công."},
+            status=status.HTTP_200_OK,
+        )
+
+
 class MeAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -128,7 +194,8 @@ class MeAPIView(APIView):
         summary="Cập nhật thông tin cá nhân",
         description=(
             "Hỗ trợ upload avatar qua multipart/form-data để lưu trực tiếp vào "
-            "MinIO thông qua django-storages."
+            "MinIO thông qua django-storages. Có thể gửi thêm cover_image để "
+            "cập nhật ảnh bìa."
         ),
         request={
             "application/json": UserMeUpdateSerializer,
@@ -147,6 +214,29 @@ class MeAPIView(APIView):
 
         output = UserProfileSerializer(request.user, context={"request": request})
         return Response(output.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        tags=["Users"],
+        summary="Xóa tài khoản",
+        description=(
+            "Xóa tài khoản người dùng hiện tại. Yêu cầu xác nhận bằng mật khẩu. "
+            "Thao tác này không thể hoàn tác."
+        ),
+        request=DeleteAccountSerializer,
+        responses={200: DeleteAccountResponseSerializer},
+    )
+    def delete(self, request, *args, **kwargs):
+        serializer = DeleteAccountSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response(
+            {"detail": "Tài khoản đã được xóa thành công."},
+            status=status.HTTP_200_OK,
+        )
 
 
 class PhotographerMeProfileAPIView(APIView):

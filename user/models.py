@@ -6,6 +6,10 @@ def user_avatar_upload_path(instance, filename):
     return f"users/{instance.id}/avatar/{filename}"
 
 
+def user_cover_image_upload_path(instance, filename):
+    return f"users/{instance.id}/cover/{filename}"
+
+
 class User(AbstractUser):
     class Roles(models.TextChoices):
         CUSTOMER = "CUSTOMER", "Customer"
@@ -19,6 +23,7 @@ class User(AbstractUser):
         default=Roles.CUSTOMER,
     )
     avatar = models.URLField(blank=True, default="")
+    cover_image = models.URLField(blank=True, default="")
 
     def __str__(self):
         return f"{self.username} ({self.role})"
