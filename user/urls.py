@@ -7,6 +7,8 @@ from .views import (
     LoginAPIView,
     LogoutAPIView,
     MeAPIView,
+    PhotographerFavoriteAPIView,
+    PhotographerListAPIView,
     PhotographerMeProfileAPIView,
     RegisterAPIView,
     ResetPasswordAPIView,
@@ -22,6 +24,12 @@ urlpatterns = [
     path("auth/token/refresh/", TokenRefreshView.as_view(), name="token-refresh"),
     path("auth/token/verify/", TokenVerifyView.as_view(), name="token-verify"),
     path("users/me/", MeAPIView.as_view(), name="users-me"),
+    path("photographers/", PhotographerListAPIView.as_view(), name="photographer-list"),
+    path(
+        "photographers/<int:profile_id>/favorite/",
+        PhotographerFavoriteAPIView.as_view(),
+        name="photographer-favorite",
+    ),
     path(
         "photographers/me/profile/",
         PhotographerMeProfileAPIView.as_view(),

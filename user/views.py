@@ -2,17 +2,21 @@ import logging
 
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
+from django.db.models import BooleanField, Count, Exists, OuterRef, Q, Value
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from drf_spectacular.utils import extend_schema
 from rest_framework import generics, permissions, status
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from bookings.models import Booking
 from .email_service import EmailService
-from .models import PhotographerProfile, User
+from .models import PhotographerFavorite, PhotographerProfile, User
 from .permissions import IsPhotographer
 from .serializers import (
     DeleteAccountResponseSerializer,
@@ -23,6 +27,8 @@ from .serializers import (
     LoginSerializer,
     LogoutResponseSerializer,
     LogoutSerializer,
+    PhotographerFavoriteStateSerializer,
+    PhotographerListSerializer,
     PhotographerProfileSerializer,
     PhotographerProfileUpdateSerializer,
     RegisterSerializer,
@@ -34,6 +40,29 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _split_csv(value):
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _json_array_contains_any(queryset, field_name, values):
+    values = [value for value in values if value]
+    if not values:
+        return queryset
+
+    query = Q()
+    for value in values:
+        query |= Q(**{f"{field_name}__contains": [value]})
+    return queryset.filter(query)
+
+
+class PhotographerPagination(PageNumberPagination):
+    page_size = 12
+    page_size_query_param = "page_size"
+    max_page_size = 48
 
 
 class HealthCheckAPIView(APIView):
@@ -239,9 +268,154 @@ class MeAPIView(APIView):
         )
 
 
+class PhotographerListAPIView(generics.ListAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = PhotographerListSerializer
+    pagination_class = PhotographerPagination
+
+    def get_queryset(self):
+        request = self.request
+        queryset = (
+            PhotographerProfile.objects.select_related("user")
+            .prefetch_related("active_locations", "portfolios")
+            .filter(user__role=User.Roles.PHOTOGRAPHER, user__is_active=True)
+        )
+
+        keyword = request.query_params.get("keyword", "").strip()
+        if keyword:
+            queryset = queryset.filter(
+                Q(user__first_name__icontains=keyword)
+                | Q(user__last_name__icontains=keyword)
+                | Q(user__username__icontains=keyword)
+                | Q(user__email__icontains=keyword)
+                | Q(bio__icontains=keyword)
+                | Q(specialties__icontains=keyword)
+            )
+
+        shooting_location = request.query_params.get("shooting_location", "").strip()
+        if shooting_location:
+            if shooting_location.isdigit():
+                queryset = queryset.filter(active_locations__id=int(shooting_location))
+            else:
+                queryset = queryset.filter(
+                    active_locations__city_province__icontains=shooting_location
+                )
+
+        experience = request.query_params.get("experience_in_year", "").strip()
+        if experience:
+            if experience in {"under_1", "lt1", "0_1"}:
+                queryset = queryset.filter(experience_years__lt=1)
+            elif experience == "1_3":
+                queryset = queryset.filter(experience_years__gte=1, experience_years__lte=3)
+            elif experience == "3_5":
+                queryset = queryset.filter(experience_years__gte=3, experience_years__lte=5)
+            elif experience in {"5_plus", "over_5"}:
+                queryset = queryset.filter(experience_years__gte=5)
+            elif experience.isdigit():
+                queryset = queryset.filter(experience_years=int(experience))
+
+        gender = request.query_params.get("gender", "").strip()
+        if gender:
+            queryset = queryset.filter(gender=gender)
+
+        queryset = _json_array_contains_any(
+            queryset,
+            "languages",
+            _split_csv(request.query_params.get("languages", "")),
+        )
+        queryset = _json_array_contains_any(
+            queryset,
+            "working_models",
+            _split_csv(request.query_params.get("work_model", "")),
+        )
+        queryset = _json_array_contains_any(
+            queryset,
+            "working_packages",
+            _split_csv(request.query_params.get("work_packages", "")),
+        )
+
+        user = request.user
+        if user.is_authenticated and user.role == User.Roles.CUSTOMER:
+            favored = PhotographerFavorite.objects.filter(
+                customer=user,
+                photographer=OuterRef("pk"),
+            )
+            queryset = queryset.annotate(favored=Exists(favored))
+        else:
+            queryset = queryset.annotate(
+                favored=Value(False, output_field=BooleanField())
+            )
+
+        queryset = queryset.annotate(
+            favorite_count=Count("favorites", distinct=True),
+            shooting_count=Count(
+                "user__bookings_assigned",
+                filter=Q(user__bookings_assigned__status=Booking.Status.COMPLETED),
+                distinct=True,
+            ),
+        ).distinct()
+
+        sort_by = request.query_params.get("sortBy", "createdAt")
+        direction = request.query_params.get("direction", "desc")
+        sort_fields = {
+            "createdAt": "created_at",
+            "created_at": "created_at",
+            "shooting_count": "shooting_count",
+            "favorite_count": "favorite_count",
+            "rating": "rating_avg",
+        }
+        sort_field = sort_fields.get(sort_by, "created_at")
+        prefix = "" if direction == "asc" else "-"
+        return queryset.order_by(f"{prefix}{sort_field}", "id")
+
+
+class PhotographerFavoriteAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_profile(self, profile_id):
+        return generics.get_object_or_404(
+            PhotographerProfile.objects.filter(user__role=User.Roles.PHOTOGRAPHER),
+            pk=profile_id,
+        )
+
+    @staticmethod
+    def _ensure_customer(user):
+        if user.role != User.Roles.CUSTOMER:
+            raise PermissionDenied("Chi khach hang moi co the yeu thich nhiep anh gia.")
+
+    @staticmethod
+    def _response(profile, favored):
+        serializer = PhotographerFavoriteStateSerializer(
+            {
+                "photographer_id": profile.id,
+                "favored": favored,
+                "favorite_count": profile.favorites.count(),
+            }
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, profile_id, *args, **kwargs):
+        self._ensure_customer(request.user)
+        profile = self._get_profile(profile_id)
+        PhotographerFavorite.objects.get_or_create(
+            customer=request.user,
+            photographer=profile,
+        )
+        return self._response(profile, favored=True)
+
+    def delete(self, request, profile_id, *args, **kwargs):
+        self._ensure_customer(request.user)
+        profile = self._get_profile(profile_id)
+        PhotographerFavorite.objects.filter(
+            customer=request.user,
+            photographer=profile,
+        ).delete()
+        return self._response(profile, favored=False)
+
+
 class PhotographerMeProfileAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsPhotographer]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def _get_profile(self):
         profile, _ = PhotographerProfile.objects.get_or_create(user=self.request.user)
@@ -264,17 +438,13 @@ class PhotographerMeProfileAPIView(APIView):
             "Cập nhật thông tin hồ sơ nhiếp ảnh gia. Nếu gửi avatar bằng "
             "multipart/form-data, ảnh sẽ được lưu vào MinIO."
         ),
-        request={"multipart/form-data": PhotographerProfileUpdateSerializer},
+        request={
+            "application/json": PhotographerProfileUpdateSerializer,
+            "multipart/form-data": PhotographerProfileUpdateSerializer,
+        },
         responses={200: PhotographerProfileSerializer},
     )
     def patch(self, request, *args, **kwargs):
-        content_type = (request.content_type or "").lower()
-        if not content_type.startswith("multipart/form-data"):
-            return Response(
-                {"detail": "Vui long gui du lieu bang multipart/form-data."},
-                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            )
-
         profile = self._get_profile()
         serializer = PhotographerProfileUpdateSerializer(
             instance=profile,

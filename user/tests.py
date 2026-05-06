@@ -1,3 +1,5 @@
+from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from django.conf import settings
@@ -7,12 +9,17 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import User
+from bookings.models import Booking
+from locations.models import Location
+from portfolio.models import Portfolio
+
+from .models import PhotographerProfile, User
 from .permissions import IsPhotographer
 from .email_service import EmailService
 
@@ -177,6 +184,205 @@ class UserMeAPITests(APITestCase):
         self.assertEqual(self.user.cover_image, "http://localhost/media/users/1/cover/cover.jpg")
         self.assertIn("cover_image_url", response.data)
         self.assertEqual(response.data["cover_image_url"], self.user.cover_image)
+
+
+class PhotographerPublicAPITests(APITestCase):
+    def setUp(self):
+        self.url = "/api/photographers/"
+        self.hanoi = Location.objects.create(city_province="Ha Noi", district="Hoan Kiem")
+        self.hcmc = Location.objects.create(city_province="TP. Ho Chi Minh", district="District 1")
+        self.customer = make_user(username="customer-api", role=User.Roles.CUSTOMER)
+        self.photographer = self._make_photographer(
+            username="linh-photo",
+            first_name="Linh",
+            last_name="Tran",
+            bio="Fine art portrait photographer",
+            specialties="portrait,wedding",
+            experience_years=4,
+            gender="female",
+            languages=["vi", "en"],
+            working_models=["outdoor"],
+            working_packages=["PERSONAL", "WEDDING"],
+            locations=[self.hanoi],
+            rating_avg=Decimal("4.80"),
+            total_reviews=5,
+        )
+        self._make_portfolio(self.photographer, "portfolios/linh/one.jpg")
+        self._make_portfolio(self.photographer, "portfolios/linh/two.jpg")
+        self.completed_booking = self._make_booking(
+            photographer=self.photographer.user,
+            location=self.hanoi,
+            status=Booking.Status.COMPLETED,
+        )
+        self.customer_profile = self._make_photographer(
+            username="hidden-customer-role",
+            role=User.Roles.CUSTOMER,
+            bio="This profile should not appear because user is not a photographer.",
+        )
+
+    def _make_photographer(self, username, role=User.Roles.PHOTOGRAPHER, locations=None, **profile_attrs):
+        user = make_user(username=username, role=role)
+        user.first_name = profile_attrs.pop("first_name", "")
+        user.last_name = profile_attrs.pop("last_name", "")
+        user.avatar = f"https://cdn.example.com/{username}/avatar.jpg"
+        user.save(update_fields=["first_name", "last_name", "avatar"])
+
+        profile, _ = PhotographerProfile.objects.get_or_create(user=user)
+        for field, value in profile_attrs.items():
+            setattr(profile, field, value)
+        profile.save()
+        if locations is not None:
+            profile.active_locations.set(locations)
+        return profile
+
+    @staticmethod
+    def _make_portfolio(profile, image):
+        return Portfolio.objects.create(
+            photographer=profile,
+            image=image,
+            category=Portfolio.Categories.PERSONAL,
+        )
+
+    def _make_booking(self, photographer, location, status=Booking.Status.OPEN):
+        return Booking.objects.create(
+            customer=self.customer,
+            photographer=photographer,
+            title="Completed portrait session",
+            category=Booking.Categories.PERSONAL,
+            shoot_date=timezone.localdate() + timedelta(days=10),
+            deadline_date=timezone.now() + timedelta(days=5),
+            location=location,
+            environment=Booking.Environments.OUTDOOR,
+            requires_makeup=False,
+            budget_min=Decimal("100000.00"),
+            budget_max=Decimal("500000.00"),
+            status=status,
+        )
+
+    def test_public_list_returns_photographer_cards_with_stats(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        item = response.data["results"][0]
+        self.assertEqual(item["id"], self.photographer.id)
+        self.assertEqual(item["display_name"], "Linh Tran")
+        self.assertEqual(item["avatar_url"], self.photographer.user.avatar)
+        self.assertEqual(item["rating_avg"], "4.80")
+        self.assertEqual(item["total_reviews"], 5)
+        self.assertEqual(item["shooting_count"], 1)
+        self.assertEqual(item["favorite_count"], 0)
+        self.assertFalse(item["favored"])
+        self.assertEqual(len(item["gallery_preview"]), 2)
+        self.assertEqual(item["active_locations"][0]["city_province"], "Ha Noi")
+
+    def test_keyword_searches_name_username_bio_and_specialties(self):
+        response = self.client.get(self.url, {"keyword": "wedding"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], self.photographer.id)
+
+        empty_response = self.client.get(self.url, {"keyword": "commercial"})
+        self.assertEqual(empty_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(empty_response.data["count"], 0)
+
+    def test_advanced_filters_match_profile_metadata(self):
+        response = self.client.get(
+            self.url,
+            {
+                "shooting_location": str(self.hanoi.id),
+                "experience_in_year": "3_5",
+                "gender": "female",
+                "languages": "en",
+                "work_model": "outdoor",
+                "work_packages": "WEDDING",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], self.photographer.id)
+
+        empty_response = self.client.get(self.url, {"languages": "ja"})
+        self.assertEqual(empty_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(empty_response.data["count"], 0)
+
+    def test_sorting_and_pagination_are_stable(self):
+        popular = self._make_photographer(
+            username="popular-photo",
+            first_name="Popular",
+            experience_years=7,
+            rating_avg=Decimal("5.00"),
+            total_reviews=8,
+            locations=[self.hcmc],
+        )
+        for index in range(2):
+            self._make_booking(
+                photographer=popular.user,
+                location=self.hcmc,
+                status=Booking.Status.COMPLETED,
+            )
+
+        response = self.client.get(
+            self.url,
+            {"sortBy": "shooting_count", "direction": "desc", "page_size": 1},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 2)
+        self.assertIsNotNone(response.data["next"])
+        self.assertEqual(response.data["results"][0]["id"], popular.id)
+
+    def test_customer_can_favorite_and_unfavorite_once(self):
+        self.client.force_authenticate(user=self.customer)
+
+        create_response = self.client.post(f"{self.url}{self.photographer.id}/favorite/")
+        duplicate_response = self.client.post(f"{self.url}{self.photographer.id}/favorite/")
+        list_response = self.client.get(self.url)
+        delete_response = self.client.delete(f"{self.url}{self.photographer.id}/favorite/")
+
+        self.assertEqual(create_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(create_response.data["favored"])
+        self.assertEqual(create_response.data["favorite_count"], 1)
+        self.assertEqual(duplicate_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(duplicate_response.data["favorite_count"], 1)
+        self.assertTrue(list_response.data["results"][0]["favored"])
+        self.assertEqual(delete_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(delete_response.data["favored"])
+        self.assertEqual(delete_response.data["favorite_count"], 0)
+
+    def test_favorite_requires_customer_account(self):
+        anonymous_response = self.client.post(f"{self.url}{self.photographer.id}/favorite/")
+        photographer_user = make_user(username="blocked-photo", role=User.Roles.PHOTOGRAPHER)
+        self.client.force_authenticate(user=photographer_user)
+        photographer_response = self.client.post(f"{self.url}{self.photographer.id}/favorite/")
+
+        self.assertEqual(anonymous_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(photographer_response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class PhotographerProfileMetadataAPITests(APITestCase):
+    def setUp(self):
+        self.user = make_user(username="profile-meta", role=User.Roles.PHOTOGRAPHER)
+        self.url = reverse("photographers-me-profile")
+
+    def test_photographer_can_update_filter_metadata(self):
+        self.client.force_authenticate(user=self.user)
+        payload = {
+            "gender": "male",
+            "languages": ["vi", "en"],
+            "working_models": ["studio", "outdoor"],
+            "working_packages": ["PERSONAL", "EVENT"],
+        }
+
+        response = self.client.patch(self.url, payload, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["gender"], "male")
+        self.assertEqual(response.data["languages"], ["vi", "en"])
+        self.assertEqual(response.data["working_models"], ["studio", "outdoor"])
+        self.assertEqual(response.data["working_packages"], ["PERSONAL", "EVENT"])
 
 
 # ---------------------------------------------------------------------------
