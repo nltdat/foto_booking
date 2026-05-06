@@ -1,4 +1,5 @@
 from drf_spectacular.utils import extend_schema
+from django.db.models.functions import Lower
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,7 +14,10 @@ from .serializers import LocationSerializer, PhotographerLocationSyncSerializer
 class LocationListAPIView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = LocationSerializer
-    queryset = Location.objects.all().order_by("city_province", "district")
+    queryset = Location.objects.all().order_by(
+        Lower("city_province"),
+        Lower("district"),
+    )
 
     @extend_schema(
         tags=["Locations"],

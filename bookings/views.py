@@ -4,6 +4,7 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from fotonow.pagination import DefaultPageNumberPagination
 from user.models import User
 
 from .models import Booking, BookingBid
@@ -15,6 +16,7 @@ class BookingViewSet(viewsets.ModelViewSet):
     """ViewSet for booking management and bid acceptance workflow."""
 
     serializer_class = BookingSerializer
+    pagination_class = DefaultPageNumberPagination
     queryset = Booking.objects.select_related(
         "customer",
         "photographer",
@@ -35,6 +37,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         """Photographers see OPEN market; customers see own bookings."""
         user = self.request.user
         queryset = self.queryset
+
+        if self.action == "accept_bid":
+            return queryset
 
         if user.role == User.Roles.PHOTOGRAPHER:
             queryset = queryset.filter(status=Booking.Status.OPEN)
@@ -146,6 +151,7 @@ class BookingBidViewSet(viewsets.ModelViewSet):
     """ViewSet for photographer bidding and owner-facing bid listing."""
 
     serializer_class = BookingBidSerializer
+    pagination_class = DefaultPageNumberPagination
     queryset = BookingBid.objects.select_related(
         "booking",
         "booking__customer",

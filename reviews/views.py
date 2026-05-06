@@ -3,6 +3,8 @@ from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from fotonow.pagination import DefaultPageNumberPagination
+
 from .models import Review
 from .permissions import IsBookingParticipant
 from .serializers import ReviewSerializer
@@ -12,6 +14,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
     """Create and list reviews for photographers."""
 
     serializer_class = ReviewSerializer
+    pagination_class = DefaultPageNumberPagination
     queryset = Review.objects.select_related(
         "booking",
         "reviewer",
