@@ -6,6 +6,10 @@ def user_avatar_upload_path(instance, filename):
     return f"users/{instance.id}/avatar/{filename}"
 
 
+def user_cover_image_upload_path(instance, filename):
+    return f"users/{instance.id}/cover/{filename}"
+
+
 class User(AbstractUser):
     class Roles(models.TextChoices):
         CUSTOMER = "CUSTOMER", "Customer"
@@ -19,6 +23,7 @@ class User(AbstractUser):
         default=Roles.CUSTOMER,
     )
     avatar = models.URLField(blank=True, default="")
+    cover_image = models.URLField(blank=True, default="")
 
     def __str__(self):
         return f"{self.username} ({self.role})"
@@ -40,6 +45,17 @@ class PhotographerProfile(models.Model):
         blank=True,
     )
     experience_years = models.PositiveSmallIntegerField(default=0)
+    rating_avg = models.DecimalField(
+        max_digits=3,
+        decimal_places=2,
+        default=0,
+    )
+    total_reviews = models.PositiveIntegerField(default=0)
+    active_locations = models.ManyToManyField(
+        "locations.Location",
+        related_name="locations",
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

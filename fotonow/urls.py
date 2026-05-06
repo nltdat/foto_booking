@@ -10,6 +10,10 @@ class FotonowSpectacularAPIView(SpectacularAPIView):
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("user.urls")),
+    path("api/", include("locations.urls")),
+    path("api/", include("portfolio.urls")),
+    path("api/", include("bookings.urls")),
+    path("api/", include("reviews.urls")),
     path(
         "api/schema/",
         FotonowSpectacularAPIView.as_view(name="schema"),
