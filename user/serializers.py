@@ -332,6 +332,12 @@ class PhotographerProfileSerializer(serializers.ModelSerializer):
             "city",
             "hourly_rate",
             "experience_years",
+            "gender",
+            "languages",
+            "working_models",
+            "working_packages",
+            "rating_avg",
+            "total_reviews",
             "active_locations",
             "created_at",
             "updated_at",
@@ -349,8 +355,108 @@ class PhotographerProfileSerializer(serializers.ModelSerializer):
         ]
 
 
+class PhotographerListSerializer(serializers.ModelSerializer):
+    display_name = serializers.SerializerMethodField()
+    username = serializers.CharField(source="user.username", read_only=True)
+    avatar_url = serializers.SerializerMethodField()
+    cover_image_url = serializers.SerializerMethodField()
+    active_locations = serializers.SerializerMethodField()
+    shooting_count = serializers.IntegerField(read_only=True)
+    favorite_count = serializers.IntegerField(read_only=True)
+    favored = serializers.BooleanField(read_only=True)
+    gallery_preview = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PhotographerProfile
+        fields = [
+            "id",
+            "display_name",
+            "username",
+            "avatar_url",
+            "cover_image_url",
+            "bio",
+            "specialties",
+            "city",
+            "hourly_rate",
+            "experience_years",
+            "gender",
+            "languages",
+            "working_models",
+            "working_packages",
+            "active_locations",
+            "rating_avg",
+            "total_reviews",
+            "shooting_count",
+            "favorite_count",
+            "favored",
+            "gallery_preview",
+            "created_at",
+            "updated_at",
+        ]
+
+    @staticmethod
+    def get_display_name(obj):
+        full_name = " ".join(
+            part for part in [obj.user.first_name, obj.user.last_name] if part
+        ).strip()
+        return full_name or obj.user.username or obj.user.email
+
+    @staticmethod
+    def get_avatar_url(obj):
+        return _to_public_media_url(obj.user.avatar)
+
+    @staticmethod
+    def get_cover_image_url(obj):
+        return _to_public_media_url(obj.user.cover_image)
+
+    @staticmethod
+    def get_active_locations(obj):
+        return [
+            {
+                "id": location.id,
+                "city_province": location.city_province,
+                "district": location.district,
+            }
+            for location in obj.active_locations.all()
+        ]
+
+    @staticmethod
+    def get_gallery_preview(obj):
+        preview = []
+        for portfolio in obj.portfolios.all()[:5]:
+            if not portfolio.image:
+                continue
+            preview.append(
+                {
+                    "id": str(portfolio.id),
+                    "src": _to_public_media_url(portfolio.image.url),
+                    "alt": str(portfolio.image.name),
+                    "category": portfolio.category,
+                }
+            )
+        return preview
+
+
+class PhotographerFavoriteStateSerializer(serializers.Serializer):
+    photographer_id = serializers.IntegerField()
+    favored = serializers.BooleanField()
+    favorite_count = serializers.IntegerField()
+
+
 class PhotographerProfileUpdateSerializer(serializers.ModelSerializer):
     avatar = serializers.FileField(write_only=True, required=False, allow_null=True)
+    languages = serializers.ListField(
+        child=serializers.CharField(max_length=50),
+        required=False,
+    )
+    working_models = serializers.ListField(
+        child=serializers.CharField(max_length=50),
+        required=False,
+    )
+    working_packages = serializers.ListField(
+        child=serializers.CharField(max_length=50),
+        required=False,
+    )
 
     class Meta:
         model = PhotographerProfile
@@ -360,6 +466,10 @@ class PhotographerProfileUpdateSerializer(serializers.ModelSerializer):
             "city",
             "hourly_rate",
             "experience_years",
+            "gender",
+            "languages",
+            "working_models",
+            "working_packages",
             "avatar",
         ]
 
