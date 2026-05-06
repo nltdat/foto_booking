@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models.functions import Lower
 
 
 class Location(models.Model):
@@ -6,7 +7,7 @@ class Location(models.Model):
     district = models.CharField(max_length=120)
 
     class Meta:
-        ordering = ["city_province", "district"]
+        ordering = [Lower("city_province"), Lower("district")]
         constraints = [
             models.UniqueConstraint(
                 fields=["city_province", "district"],

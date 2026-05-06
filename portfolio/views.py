@@ -8,6 +8,7 @@ from rest_framework import filters, permissions, viewsets
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 
+from fotonow.pagination import DefaultPageNumberPagination
 from user.models import PhotographerProfile, User
 
 from .models import Portfolio
@@ -20,7 +21,14 @@ class IsOwnerOrReadOnly(permissions.BasePermission):
     def has_permission(self, request, view):
         if request.method in permissions.SAFE_METHODS:
             return True
-        return bool(request.user and request.user.is_authenticated)
+
+        if not bool(request.user and request.user.is_authenticated):
+            return False
+
+        if getattr(view, "action", None) == "create":
+            return request.user.role == User.Roles.PHOTOGRAPHER
+
+        return True
 
     def has_object_permission(self, request, view, obj):
         if request.method in permissions.SAFE_METHODS:
@@ -68,6 +76,7 @@ class PortfolioFilterBackend(filters.BaseFilterBackend):
 )
 class PortfolioViewSet(viewsets.ModelViewSet):
     serializer_class = PortfolioSerializer
+    pagination_class = DefaultPageNumberPagination
     permission_classes = [IsOwnerOrReadOnly]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     filter_backends = [PortfolioFilterBackend]
