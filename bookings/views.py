@@ -25,6 +25,9 @@ class BookingViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         """Role-based permissions per action."""
+        if self.action in ["list", "retrieve"]:
+            return [permissions.AllowAny()]
+
         if self.action == "create":
             return [permissions.IsAuthenticated(), IsCustomer()]
 
@@ -39,6 +42,16 @@ class BookingViewSet(viewsets.ModelViewSet):
         queryset = self.queryset
 
         if self.action == "accept_bid":
+            return queryset
+
+        if not user.is_authenticated:
+            queryset = queryset.filter(status=Booking.Status.OPEN)
+            location = self.request.query_params.get("location")
+            category = self.request.query_params.get("category")
+            if location:
+                queryset = queryset.filter(location_id=location)
+            if category:
+                queryset = queryset.filter(category=category)
             return queryset
 
         if user.role == User.Roles.PHOTOGRAPHER:
